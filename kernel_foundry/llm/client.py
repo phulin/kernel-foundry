@@ -28,7 +28,9 @@ class LLMClient:
         Retries on rate-limit and transient errors with exponential backoff.
         """
         effective_model = model or self._config.llm_model
-        effective_temp = temperature if temperature is not None else self._config.llm_temperature
+        effective_temp = (
+            temperature if temperature is not None else self._config.llm_temperature
+        )
 
         for attempt in range(max_retries):
             try:
@@ -37,7 +39,7 @@ class LLMClient:
                     messages=[{"role": "user", "content": prompt}],
                     n=n,
                     temperature=effective_temp,
-                    max_tokens=self._config.llm_max_tokens,
+                    max_completion_tokens=self._config.llm_max_tokens,
                     top_p=self._config.llm_top_p,
                 )
                 return [choice.message.content or "" for choice in response.choices]
@@ -46,13 +48,13 @@ class LLMClient:
                 print(f"  Rate limited. Waiting {wait}s...")
                 time.sleep(wait)
             except openai.APITimeoutError:
-                wait = 2 ** attempt
+                wait = 2**attempt
                 print(f"  API timeout. Waiting {wait}s...")
                 time.sleep(wait)
             except openai.APIError as e:
                 if attempt == max_retries - 1:
                     raise
-                wait = 2 ** attempt
+                wait = 2**attempt
                 print(f"  API error ({e}). Waiting {wait}s...")
                 time.sleep(wait)
 
