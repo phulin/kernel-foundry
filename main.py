@@ -19,7 +19,6 @@ from pathlib import Path
 from kernel_foundry.config import EvolutionConfig
 from kernel_foundry.evolution.loop import EvolutionLoop
 
-
 BUILTIN_TASKS = {
     "softmax": "tasks.softmax",
     "matmul": "tasks.matmul",
@@ -35,10 +34,19 @@ def cli() -> None:
         "task",
         help=f"Task name ({', '.join(BUILTIN_TASKS)}) or Python module path",
     )
-    parser.add_argument("--generations", type=int, default=None, help="Override max_generations")
-    parser.add_argument("--population", type=int, default=None, help="Override population_size")
+    parser.add_argument(
+        "--generations", type=int, default=None, help="Override max_generations"
+    )
+    parser.add_argument(
+        "--population", type=int, default=None, help="Override population_size"
+    )
     parser.add_argument("--model", default=None, help="Override LLM model")
     parser.add_argument("--output", default=None, help="Save results JSON to this path")
+    parser.add_argument(
+        "--records",
+        default="records",
+        help="Append all evaluated kernels as JSONL to this path",
+    )
     parser.add_argument(
         "--checkpoint",
         default=None,
@@ -68,7 +76,10 @@ def cli() -> None:
     try:
         task_module = importlib.import_module(task_module_path)
     except ImportError as e:
-        print(f"Error: could not import task module {task_module_path!r}: {e}", file=sys.stderr)
+        print(
+            f"Error: could not import task module {task_module_path!r}: {e}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if not hasattr(task_module, "build"):
@@ -80,10 +91,12 @@ def cli() -> None:
 
     print(f"Loading task: {args.task}...")
     task = task_module.build(config)
-    print(f"Baseline: {task.baseline_time_ms:.3f}ms | Target: {config.target_speedup}x speedup")
+    print(
+        f"Baseline: {task.baseline_time_ms:.3f}ms | Target: {config.target_speedup}x speedup"
+    )
 
     # Run evolution
-    loop = EvolutionLoop(task, config)
+    loop = EvolutionLoop(task, config, records_path=args.records)
     best = loop.run()
 
     # Save output
@@ -114,7 +127,7 @@ def cli() -> None:
 
     print(f"\nBest speedup: {best.eval_result.speedup:.2f}x")
     print(f"Behavioral coords: {best.coords}")
-    print(f"\n--- Best Kernel Source ---")
+    print("\n--- Best Kernel Source ---")
     print(best.source_code)
 
 

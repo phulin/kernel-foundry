@@ -44,10 +44,12 @@ class EvolutionLoop:
       3. Template: post-main autotune sweep for kernels with @triton.autotune decorators.
     """
 
-    def __init__(self, task: TaskSpec, config: EvolutionConfig) -> None:
+    def __init__(self, task: TaskSpec, config: EvolutionConfig, records_path: str | None = None) -> None:
         self.task = task
         self.config = config
         self.rng = np.random.default_rng()
+        self._records_path = records_path
+        self._flushed_count = 0
 
         # Core components
         self.archive = MAPElitesArchive(bins=config.archive_bins)
@@ -166,6 +168,7 @@ class EvolutionLoop:
             self._print_candidate_result(i, record)
 
         print(f"  Archive: {self.archive}")
+        self._flush_records()
 
     def _run_generation(self, gen: int) -> None:
         # Select parent
@@ -209,6 +212,8 @@ class EvolutionLoop:
                 self.prompt_archive.update_fitness(
                     active_variant.variant_id, record.eval_result.fitness
                 )
+
+        self._flush_records()
 
     def _run_meta_prompt_update(self, gen: int) -> None:
         print(f"\n  [Gen {gen}] Running meta-prompt update...")
@@ -375,7 +380,31 @@ class EvolutionLoop:
         )
         print(f"[Gen {gen:3d}] archive={self.archive.size()}/64 | {best_str}")
 
-    # ------------------------------------------------------------------ checkpoint
+    # ------------------------------------------------------------------ records / checkpoint
+
+    def _flush_records(self) -> None:
+        if not self._records_path:
+            return
+        new_records = self.all_records[self._flushed_count:]
+        if not new_records:
+            return
+        with open(self._records_path, "a") as f:
+            for r in new_records:
+                entry = {
+                    "kernel_id": r.kernel_id,
+                    "generation": r.generation,
+                    "parent_id": r.parent_id,
+                    "coords": list(r.coords.to_tuple()),
+                    "compiled": r.eval_result.compiled,
+                    "correct": r.eval_result.correct,
+                    "speedup": r.eval_result.speedup,
+                    "fitness": r.eval_result.fitness,
+                    "kernel_time_ms": r.eval_result.kernel_time_ms,
+                    "error_log": r.eval_result.error_log or None,
+                    "source_code": r.source_code,
+                }
+                f.write(json.dumps(entry) + "\n")
+        self._flushed_count += len(new_records)
 
     def checkpoint(self, path: str) -> None:
         data = {
