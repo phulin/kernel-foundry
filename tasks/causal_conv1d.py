@@ -42,14 +42,15 @@ def reference_fn(
     # Causal padding: pad (width-1) on the left, 0 on the right
     width = weight.shape[1]
     dim = x.shape[1]
-    x_padded = F.pad(x, (width - 1, 0))
+    x_f32 = x.float()
+    x_padded = F.pad(x_f32, (width - 1, 0))
     out = F.conv1d(
         x_padded,
         weight.unsqueeze(1),  # (dim, 1, width)
         bias=bias,
         groups=dim,
     )
-    return F.silu(out)
+    return F.silu(out).to(x.dtype)
 
 
 def input_generator() -> tuple:
@@ -233,12 +234,12 @@ def _measure_baseline(case: dict[str, int | str]) -> float:
     result = benchmarker.measure(
         lambda x, w, b: F.silu(
             F.conv1d(
-                F.pad(x, (w.shape[1] - 1, 0)),
+                F.pad(x.float(), (w.shape[1] - 1, 0)),
                 w.unsqueeze(1),
                 bias=b,
                 groups=x.shape[1],
             )
-        ),
+        ).to(x.dtype),
         (x, weight, bias),
     )
     return result.mean_ms
