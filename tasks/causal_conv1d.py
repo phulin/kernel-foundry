@@ -12,17 +12,24 @@ This is a classic optimization target:
 from __future__ import annotations
 
 import inspect
+import math
 
 import torch
 import torch.nn.functional as F
 
 from kernel_foundry.evaluation.benchmarker import Benchmarker
-from kernel_foundry.task.spec import TaskSpec, detect_hardware_spec
+from kernel_foundry.task.spec import BenchmarkCase, TaskSpec, detect_hardware_spec
 
-BATCH = 4
-DIM = 2048
-SEQLEN = 2048
 WIDTH = 4
+DTYPE_X = torch.bfloat16
+DTYPE_WEIGHT = torch.float32
+DTYPE_BIAS = torch.float32
+
+CASE_SPECS = [
+    {"name": "small", "batch": 1, "dim": 1024, "seqlen": 512},
+    {"name": "medium", "batch": 4, "dim": 2048, "seqlen": 2048},
+    {"name": "large", "batch": 8, "dim": 4096, "seqlen": 4096},
+]
 
 
 def reference_fn(
@@ -33,20 +40,21 @@ def reference_fn(
     # x: (batch, dim, seqlen)
     # weight: (dim, width) — depthwise filter per channel
     # Causal padding: pad (width-1) on the left, 0 on the right
-    x_padded = F.pad(x, (WIDTH - 1, 0))
+    width = weight.shape[1]
+    dim = x.shape[1]
+    x_padded = F.pad(x, (width - 1, 0))
     out = F.conv1d(
         x_padded,
         weight.unsqueeze(1),  # (dim, 1, width)
         bias=bias,
-        groups=DIM,
+        groups=dim,
     )
     return F.silu(out)
 
 
 def input_generator() -> tuple:
-    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.float32)
-    bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
+    idx = torch.randint(0, len(CASE_SPECS), (), device="cpu").item()
+    x, weight, bias = _generate_inputs(CASE_SPECS[idx])
     return (x, weight, bias)
 
 
@@ -161,28 +169,57 @@ def kernel_fn(x, weight, bias):
 
 def build(config=None) -> TaskSpec:
     hardware_spec = detect_hardware_spec()
-    baseline_time_ms = _measure_baseline()
+    benchmark_cases = _build_benchmark_cases()
+    baseline_time_ms = _geometric_mean(case.baseline_time_ms for case in benchmark_cases)
+    case_summary = ", ".join(
+        f"{case['name']}: x=({case['batch']}, {case['dim']}, {case['seqlen']})"
+        for case in CASE_SPECS
+    )
 
     return TaskSpec(
         name="causal_conv1d",
         description=(
-            f"Depthwise causal 1D convolution: out[b, c, t] = bias[c] + sum_w(weight[c, w] * x[b, c, t - (WIDTH-1) + w])\n"
-            f"Input x shape: ({BATCH}, {DIM}, {SEQLEN}), dtype: bfloat16, device: CUDA\n"
-            f"Weight shape: ({DIM}, {WIDTH}) dtype: float32, Bias shape: ({DIM},) dtype: float32\n"
+            "Depthwise causal 1D convolution: "
+            f"out[b, c, t] = bias[c] + sum_w(weight[c, w] * x[b, c, t - (WIDTH-1) + w])\n"
+            f"Evaluate across shape suite: {case_summary}\n"
+            f"Weight shape per case: (dim, {WIDTH}) dtype: float32, Bias shape: (dim,) dtype: float32\n"
+            f"Input dtype: {DTYPE_X}, device: CUDA\n"
             f"Causal: output at position t depends only on x[..., t-{WIDTH - 1}:t+1]\n"
             f"Apply fused SiLU activation after the convolution.\n"
-            f"Baseline (F.conv1d depthwise): {baseline_time_ms:.3f}ms"
+            f"Aggregate baseline (geometric mean, F.conv1d depthwise): {baseline_time_ms:.3f}ms"
         ),
         reference_code=inspect.getsource(reference_fn),
         reference_fn=reference_fn,
         input_generator=input_generator,
         hardware_spec=hardware_spec,
         baseline_time_ms=baseline_time_ms,
+        benchmark_cases=benchmark_cases,
         seed_kernel=_SEED_KERNEL,
     )
 
 
-def _measure_baseline() -> float:
+def _build_benchmark_cases() -> list[BenchmarkCase]:
+    return [
+        BenchmarkCase(
+            name=case["name"],
+            input_generator=lambda case=case: _generate_inputs(case),
+            baseline_time_ms=_measure_baseline(case),
+        )
+        for case in CASE_SPECS
+    ]
+
+
+def _generate_inputs(case: dict[str, int | str]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch = int(case["batch"])
+    dim = int(case["dim"])
+    seqlen = int(case["seqlen"])
+    x = torch.randn(batch, dim, seqlen, device="cuda", dtype=DTYPE_X)
+    weight = torch.randn(dim, WIDTH, device="cuda", dtype=DTYPE_WEIGHT)
+    bias = torch.randn(dim, device="cuda", dtype=DTYPE_BIAS)
+    return (x, weight, bias)
+
+
+def _measure_baseline(case: dict[str, int | str]) -> float:
     if not torch.cuda.is_available():
         return 1.0
 
@@ -192,18 +229,21 @@ def _measure_baseline() -> float:
         benchmark_min_time=0.5,
         benchmark_min_iters=5,
     )
-    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.float32)
-    bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
+    x, weight, bias = _generate_inputs(case)
     result = benchmarker.measure(
         lambda x, w, b: F.silu(
             F.conv1d(
-                F.pad(x, (WIDTH - 1, 0)),
+                F.pad(x, (w.shape[1] - 1, 0)),
                 w.unsqueeze(1),
                 bias=b,
-                groups=DIM,
+                groups=x.shape[1],
             )
         ),
         (x, weight, bias),
     )
     return result.mean_ms
+
+
+def _geometric_mean(values) -> float:
+    values = [max(float(v), 1e-12) for v in values]
+    return math.exp(sum(math.log(v) for v in values) / len(values))

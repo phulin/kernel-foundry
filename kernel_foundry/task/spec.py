@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
+
+
+@dataclass
+class BenchmarkCase:
+    name: str
+    input_generator: Callable[[], tuple]
+    baseline_time_ms: float
 
 
 @dataclass
@@ -21,6 +28,7 @@ class TaskSpec:
     input_generator: Callable[[], tuple]  # Returns tuple of tensors for one trial
     hardware_spec: str                  # Human-readable GPU spec injected into prompts
     baseline_time_ms: float             # Reference runtime on the target hardware
+    benchmark_cases: list[BenchmarkCase] | None = None
     seed_kernel: str | None = None      # Optional starting kernel code
 
 

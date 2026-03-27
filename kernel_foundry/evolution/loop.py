@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import traceback
 import uuid
 from pathlib import Path
@@ -326,20 +327,11 @@ class EvolutionLoop:
         # Benchmark
         try:
             kernel_fn = getattr(compile_result.module, "kernel_fn")
-            inputs = self.task.input_generator()
-            bench = self.benchmarker.measure(kernel_fn, inputs)
-            result.kernel_time_ms = bench.mean_ms
-            result.baseline_time_ms = self.task.baseline_time_ms
-            result.speedup = self.task.baseline_time_ms / bench.mean_ms
-            # Profiling summary (fix 2): effective bandwidth from input tensor sizes
-            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
-            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
-            result.profiling_summary = (
-                f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
-                f"(n={bench.num_iters}) | "
-                f"input={input_bytes/1e6:.2f}MB | "
-                f"eff_bw={eff_bw_gbs:.1f}GB/s"
-            )
+            benchmark = self._benchmark_candidate(kernel_fn)
+            result.kernel_time_ms = benchmark["kernel_time_ms"]
+            result.baseline_time_ms = benchmark["baseline_time_ms"]
+            result.speedup = benchmark["speedup"]
+            result.profiling_summary = benchmark["profiling_summary"]
         except Exception:
             result.error_log = traceback.format_exc(limit=6)
             result.fitness = compute_fitness(result, self.config.target_speedup)
@@ -391,6 +383,60 @@ class EvolutionLoop:
             is_templated=is_templated,
             template_configs=template_configs,
         )
+
+    def _benchmark_candidate(self, kernel_fn) -> dict[str, float | str]:
+        cases = self.task.benchmark_cases
+        if not cases:
+            inputs = self.task.input_generator()
+            bench = self.benchmarker.measure(kernel_fn, inputs)
+            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
+            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
+            return {
+                "kernel_time_ms": bench.mean_ms,
+                "baseline_time_ms": self.task.baseline_time_ms,
+                "speedup": self.task.baseline_time_ms / bench.mean_ms,
+                "profiling_summary": (
+                    f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
+                    f"(n={bench.num_iters}) | "
+                    f"input={input_bytes/1e6:.2f}MB | "
+                    f"eff_bw={eff_bw_gbs:.1f}GB/s"
+                ),
+            }
+
+        case_times: list[float] = []
+        case_baselines: list[float] = []
+        summary_parts: list[str] = []
+        for case in cases:
+            inputs = case.input_generator()
+            bench = self.benchmarker.measure(kernel_fn, inputs)
+            case_times.append(bench.mean_ms)
+            case_baselines.append(case.baseline_time_ms)
+            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
+            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
+            speedup = case.baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0
+            summary_parts.append(
+                f"{case.name}: mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
+                f"(n={bench.num_iters}, speedup={speedup:.2f}x, input={input_bytes/1e6:.2f}MB, "
+                f"eff_bw={eff_bw_gbs:.1f}GB/s)"
+            )
+
+        kernel_time_ms = self._geometric_mean(case_times)
+        baseline_time_ms = self._geometric_mean(case_baselines)
+        speedup = baseline_time_ms / kernel_time_ms if kernel_time_ms > 0 else 0.0
+        return {
+            "kernel_time_ms": kernel_time_ms,
+            "baseline_time_ms": baseline_time_ms,
+            "speedup": speedup,
+            "profiling_summary": (
+                f"agg: mean={kernel_time_ms:.3f}ms speedup={speedup:.2f}x | "
+                + " ; ".join(summary_parts)
+            ),
+        }
+
+    @staticmethod
+    def _geometric_mean(values: list[float]) -> float:
+        safe_values = [max(float(v), 1e-12) for v in values]
+        return math.exp(sum(math.log(v) for v in safe_values) / len(safe_values))
 
     def _record_transition(
         self,
