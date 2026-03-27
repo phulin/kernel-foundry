@@ -206,6 +206,7 @@ class EvolutionLoop:
             inserted = self.archive.insert(record)
             self._record_transition(parent_effective_coords, record, inserted, generation=gen)
             self.all_records.append(record)
+            self._print_candidate_result(i, record)
 
             # Update prompt variant fitness tracking
             if active_variant and record.eval_result.fitness > 0:
