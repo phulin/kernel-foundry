@@ -6,6 +6,7 @@ from kernel_foundry.evolution.selector import (
     CuriosityDrivenSelector,
     FitnessProportionateSelector,
     IslandSelector,
+    MixedSelector,
     UniformSelector,
     make_selector,
 )
@@ -122,12 +123,38 @@ class TestIslandSelector:
             assert result.to_tuple() in occupied
 
 
+class TestMixedSelector:
+    def test_empty_returns_none(self, empty_archive, estimator, rng):
+        config = EvolutionConfig(selection_strategy="mixed")
+        assert MixedSelector(config).select(empty_archive, estimator, rng) is None
+
+    def test_returns_occupied_cell(self, populated_archive, estimator, rng):
+        config = EvolutionConfig(selection_strategy="mixed")
+        occupied = set(c.to_tuple() for c in populated_archive.get_occupied_cells())
+        for _ in range(20):
+            result = MixedSelector(config).select(populated_archive, estimator, rng)
+            assert result is not None
+            assert result.to_tuple() in occupied
+
+    def test_zero_weights_raise(self):
+        config = EvolutionConfig(
+            selection_strategy="mixed",
+            selection_weight_uniform=0.0,
+            selection_weight_fitness=0.0,
+            selection_weight_curiosity=0.0,
+            selection_weight_island=0.0,
+        )
+        with pytest.raises(ValueError, match="At least one mixed selection weight must be positive"):
+            MixedSelector(config)
+
+
 class TestMakeSelector:
     @pytest.mark.parametrize("strategy,expected_type", [
         ("uniform", UniformSelector),
         ("fitness", FitnessProportionateSelector),
         ("curiosity", CuriosityDrivenSelector),
         ("island", IslandSelector),
+        ("mixed", MixedSelector),
     ])
     def test_returns_correct_type(self, strategy, expected_type):
         config = EvolutionConfig(selection_strategy=strategy)

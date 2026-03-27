@@ -85,6 +85,35 @@ class IslandSelector:
         return occupied[rng.integers(len(occupied))]
 
 
+class MixedSelector:
+    """Sample a selection policy using configurable weights, then delegate."""
+
+    def __init__(self, config: EvolutionConfig) -> None:
+        self._selectors = [
+            UniformSelector(),
+            FitnessProportionateSelector(),
+            CuriosityDrivenSelector(),
+            IslandSelector(),
+        ]
+        weights = np.array(
+            [
+                config.selection_weight_uniform,
+                config.selection_weight_fitness,
+                config.selection_weight_curiosity,
+                config.selection_weight_island,
+            ],
+            dtype=float,
+        )
+        weights = np.maximum(weights, 0.0)
+        if weights.sum() == 0:
+            raise ValueError("At least one mixed selection weight must be positive")
+        self._probs = weights / weights.sum()
+
+    def select(self, archive, gradient_estimator, rng) -> BehavioralCoords | None:
+        selector = self._selectors[int(rng.choice(len(self._selectors), p=self._probs))]
+        return selector.select(archive, gradient_estimator, rng)
+
+
 def make_selector(config: EvolutionConfig) -> Selector:
     strategy = config.selection_strategy
     if strategy == "uniform":
@@ -95,5 +124,7 @@ def make_selector(config: EvolutionConfig) -> Selector:
         return CuriosityDrivenSelector()
     elif strategy == "island":
         return IslandSelector()
+    elif strategy == "mixed":
+        return MixedSelector(config)
     else:
         raise ValueError(f"Unknown selection strategy: {strategy!r}")

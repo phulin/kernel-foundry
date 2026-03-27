@@ -19,9 +19,13 @@ class EvolutionConfig:
     # Evolution
     max_generations: int = 40
     population_size: int = 8
-    selection_strategy: Literal["uniform", "fitness", "curiosity", "island"] = (
-        "curiosity"
+    selection_strategy: Literal["uniform", "fitness", "curiosity", "island", "mixed"] = (
+        "mixed"
     )
+    selection_weight_uniform: float = 0.25
+    selection_weight_fitness: float = 0.25
+    selection_weight_curiosity: float = 0.25
+    selection_weight_island: float = 0.25
     target_speedup: float = 18.0
 
     # Archive (bins per dimension → bins^3 cells total)

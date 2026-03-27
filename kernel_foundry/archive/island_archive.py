@@ -45,6 +45,13 @@ class IslandArchive:
     def size(self) -> int:
         return self._islands[self._current].size()
 
+    @property
+    def current_island(self) -> int:
+        return self._current
+
+    def set_current_island(self, index: int) -> None:
+        self._current = index % self._n_islands
+
     # ------------------------------------------------------------------ global API
 
     def get_best_overall(self) -> KernelRecord | None:
@@ -70,10 +77,11 @@ class IslandArchive:
     # ------------------------------------------------------------------ lifecycle
 
     def advance_generation(self, gen: int) -> None:
-        """Call once per generation. Triggers migration and island rotation when due."""
+        """Call once per generation. Rotates islands and migrates periodically."""
+        if self._n_islands > 1:
+            self._current = gen % self._n_islands
         if gen > 0 and gen % self._migration_freq == 0:
             self._migrate()
-            self._current = (self._current + 1) % self._n_islands
             print(
                 f"  [island] Migration at gen {gen}; "
                 f"active island → {self._current}"

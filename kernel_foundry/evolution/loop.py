@@ -54,8 +54,13 @@ class EvolutionLoop:
         self._records_path = records_path
         self._flushed_count = 0
 
-        # Core components — use IslandArchive when island selection is active (fix 3)
-        if config.selection_strategy == "island":
+        # Core components — island isolation is needed both for pure-island selection
+        # and for mixed selection when the island branch has non-zero weight.
+        use_islands = config.selection_strategy == "island" or (
+            config.selection_strategy == "mixed"
+            and config.selection_weight_island > 0
+        )
+        if use_islands:
             self.archive: MAPElitesArchive | IslandArchive = IslandArchive(
                 n_islands=config.island_count,
                 migration_freq=config.island_migration_freq,
@@ -173,11 +178,16 @@ class EvolutionLoop:
             if code is None:
                 print(f"  Candidate {i}: no valid Triton code extracted")
                 continue
+            if isinstance(self.archive, IslandArchive):
+                self.archive.set_current_island(i)
             record = self._evaluate_candidate(code, generation=0, parent_id=None)
             inserted = self.archive.insert(record)
             self._record_transition(_SENTINEL_COORDS, record, inserted, generation=0)
             self.all_records.append(record)
             self._print_candidate_result(i, record)
+
+        if isinstance(self.archive, IslandArchive):
+            self.archive.set_current_island(0)
 
         print(f"  Archive: {self.archive}")
         self._flush_records()
@@ -252,7 +262,7 @@ class EvolutionLoop:
         print(f"  [Gen {gen}] New prompt variant {new_variant.variant_id} inserted.")
 
     def _run_template_phase(self) -> None:
-        print(f"\n[Template phase] Checking {self.archive.size()} archive kernels for autotune...")
+        print(f"\n[Template phase] Checking {self._archive_occupied_count()} archive kernels for autotune...")
         improved = 0
         for record in list(self.archive.get_all_elites()):
             if not self.template_optimizer.is_templated(record.source_code):
@@ -486,7 +496,10 @@ class EvolutionLoop:
             if best and best.eval_result.speedup
             else "no correct kernel yet"
         )
-        print(f"[Gen {gen:3d}] archive={self.archive.size()}/{self.archive.bins**3} | {best_str}")
+        print(f"[Gen {gen:3d}] archive={self._archive_occupied_count()}/{self.archive.bins**3} | {best_str}")
+
+    def _archive_occupied_count(self) -> int:
+        return len(self.archive.get_all_elites())
 
     # ------------------------------------------------------------------ records / checkpoint
 

@@ -215,10 +215,17 @@ class TestIslandArchive:
         from tests.conftest import make_record
         ia = IslandArchive(n_islands=2, migration_freq=5, bins=4)
         ia.insert(make_record(1, 0, 0, speedup=2.0))
-        initial_island = ia._current
-        for gen in range(1, 6):  # gen 5 triggers migration
-            ia.advance_generation(gen)
-        assert ia._current != initial_island
+        ia.advance_generation(1)
+        assert ia._current == 1
+        ia.advance_generation(2)
+        assert ia._current == 0
+        ia.advance_generation(5)  # still rotates; also triggers migration
+        assert ia._current == 1
+
+    def test_set_current_island_wraps_index(self):
+        ia = IslandArchive(n_islands=3, bins=4)
+        ia.set_current_island(4)
+        assert ia.current_island == 1
 
     def test_get_best_overall_across_islands(self):
         from tests.conftest import make_record

@@ -54,7 +54,7 @@ def cli() -> None:
     )
     parser.add_argument(
         "--strategy",
-        choices=["uniform", "fitness", "curiosity", "island"],
+        choices=["uniform", "fitness", "curiosity", "island", "mixed"],
         default=None,
         help="Override selection strategy",
     )
