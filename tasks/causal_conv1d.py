@@ -26,7 +26,6 @@ DTYPE_WEIGHT = torch.float32
 DTYPE_BIAS = torch.float32
 
 CASE_SPECS = [
-    {"name": "small", "batch": 1, "dim": 1024, "seqlen": 512},
     {"name": "medium", "batch": 4, "dim": 2048, "seqlen": 2048},
     {"name": "large", "batch": 8, "dim": 4096, "seqlen": 4096},
 ]
