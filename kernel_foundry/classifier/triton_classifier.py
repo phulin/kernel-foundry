@@ -51,16 +51,28 @@ class TritonBehaviorClassifier:
 
     # ------------------------------------------------------------------ helpers
 
+    # Sugar reductions: tl.sum/max/min/cumsum are wrappers around tl.reduce
+    _SUGAR_REDUCTIONS = frozenset({"sum", "max", "min", "cumsum"})
+    # Normalise base-2 variants to their natural-base counterparts
+    _TRANSCENDENTAL_ALIASES = {"exp2": "exp", "log2": "log"}
+
     def _collect_tl_calls(self, tree: ast.AST) -> dict[str, int]:
-        """Return {tl_func_name: count} for all tl.X(...) calls in the tree."""
+        """Return {tl_func_name: count} for all tl.X(...) calls."""
         counts: dict[str, int] = {}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                if func.value.id == "tl":
-                    counts[func.attr] = counts.get(func.attr, 0) + 1
+            if not isinstance(func, ast.Attribute):
+                continue
+            if not (isinstance(func.value, ast.Name) and func.value.id == "tl"):
+                continue
+            attr = func.attr
+            if attr in self._SUGAR_REDUCTIONS:
+                key = "reduce"
+            else:
+                key = self._TRANSCENDENTAL_ALIASES.get(attr, attr)
+            counts[key] = counts.get(key, 0) + 1
         return counts
 
     def _has_tiling(self, tree: ast.AST, tl_calls: dict[str, int]) -> bool:

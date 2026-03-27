@@ -49,6 +49,115 @@ def input_generator() -> tuple:
     return (x, weight, bias)
 
 
+_SEED_KERNEL = """\
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _silu(acc):
+    return acc / (1 + tl.exp2(-1.44269504089 * acc))
+
+
+@triton.jit
+def _causal_conv1d_fwd_kernel(
+    X, WEIGHT, BIAS, OUT,
+    seqlen, dim,
+    stride_x_batch, stride_x_channel, stride_x_seqlen,
+    stride_weight_channel, stride_weight_width,
+    stride_bias_channel,
+    stride_out_batch, stride_out_channel, stride_out_seqlen,
+    HAS_BIAS: tl.constexpr,
+    SILU_ACTIVATION: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    pid_l = tl.program_id(0).to(tl.int64)
+    pid_c = tl.program_id(1).to(tl.int64)
+    pid_b = tl.program_id(2).to(tl.int64)
+
+    channels = pid_c * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
+    out_offsets = pid_l * BLOCK_L + tl.arange(0, BLOCK_L).to(tl.int64)
+
+    channel_mask = channels < dim
+    out_mask = out_offsets < seqlen
+    full_mask = channel_mask[:, None] & out_mask[None, :]
+
+    x_ptrs = (
+        X
+        + pid_b * stride_x_batch
+        + channels[:, None] * stride_x_channel
+        + out_offsets[None, :] * stride_x_seqlen
+    )
+    out_ptrs = (
+        OUT
+        + pid_b * stride_out_batch
+        + channels[:, None] * stride_out_channel
+        + out_offsets[None, :] * stride_out_seqlen
+    )
+    weight_ptrs = WEIGHT + channels * stride_weight_channel
+
+    acc = tl.zeros((BLOCK_C, BLOCK_L), dtype=tl.float32)
+    if HAS_BIAS:
+        bias_vals = tl.load(BIAS + channels * stride_bias_channel, mask=channel_mask, other=0.0).to(tl.float32)
+        acc += bias_vals[:, None]
+
+    w0 = tl.load(weight_ptrs + 0 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+    x0_ptrs = x_ptrs - (WIDTH - 1) * stride_x_seqlen
+    x0_mask = channel_mask[:, None] & (out_offsets[None, :] >= (WIDTH - 1)) & out_mask[None, :]
+    x0 = tl.load(x0_ptrs, mask=x0_mask, other=0.0).to(tl.float32)
+    acc += w0[:, None] * x0
+
+    w1 = tl.load(weight_ptrs + 1 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+    x1_ptrs = x_ptrs - (WIDTH - 2) * stride_x_seqlen
+    x1_mask = channel_mask[:, None] & (out_offsets[None, :] >= (WIDTH - 2)) & out_mask[None, :]
+    x1 = tl.load(x1_ptrs, mask=x1_mask, other=0.0).to(tl.float32)
+    acc += w1[:, None] * x1
+
+    if WIDTH >= 3:
+        w2 = tl.load(weight_ptrs + 2 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+        x2_ptrs = x_ptrs - (WIDTH - 3) * stride_x_seqlen
+        x2_mask = channel_mask[:, None] & (out_offsets[None, :] >= (WIDTH - 3)) & out_mask[None, :]
+        x2 = tl.load(x2_ptrs, mask=x2_mask, other=0.0).to(tl.float32)
+        acc += w2[:, None] * x2
+
+    if WIDTH >= 4:
+        w3 = tl.load(weight_ptrs + 3 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+        x3 = tl.load(x_ptrs, mask=full_mask, other=0.0).to(tl.float32)
+        acc += w3[:, None] * x3
+
+    if SILU_ACTIVATION:
+        acc = _silu(acc)
+
+    tl.store(out_ptrs, acc, mask=full_mask)
+
+
+def kernel_fn(x, weight, bias):
+    batch, dim, seqlen = x.shape
+    out = torch.empty_like(x)
+    BLOCK_C = 32
+    BLOCK_L = 128
+    width = weight.shape[1]
+    grid = (triton.cdiv(seqlen, BLOCK_L), triton.cdiv(dim, BLOCK_C), batch)
+    _causal_conv1d_fwd_kernel[grid](
+        x, weight, bias, out,
+        seqlen, dim,
+        x.stride(0), x.stride(1), x.stride(2),
+        weight.stride(0), weight.stride(1),
+        bias.stride(0),
+        out.stride(0), out.stride(1), out.stride(2),
+        HAS_BIAS=True,
+        SILU_ACTIVATION=False,
+        WIDTH=width,
+        BLOCK_C=BLOCK_C,
+        BLOCK_L=BLOCK_L,
+    )
+    return out
+"""
+
+
 def build(config=None) -> TaskSpec:
     hardware_spec = detect_hardware_spec()
     baseline_time_ms = _measure_baseline()
@@ -68,6 +177,7 @@ def build(config=None) -> TaskSpec:
         input_generator=input_generator,
         hardware_spec=hardware_spec,
         baseline_time_ms=baseline_time_ms,
+        seed_kernel=_SEED_KERNEL,
     )
 
 

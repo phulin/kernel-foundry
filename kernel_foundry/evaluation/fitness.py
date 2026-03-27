@@ -18,5 +18,5 @@ def compute_fitness(result: EvalResult, target_speedup: float = 2.0) -> float:
     if not result.correct:
         return 0.1
     speedup = result.speedup or 0.0
-    s_norm = min(1.0, speedup / target_speedup)
+    s_norm = speedup / target_speedup
     return 0.5 + 0.5 * s_norm

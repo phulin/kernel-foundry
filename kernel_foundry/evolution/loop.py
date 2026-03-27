@@ -141,6 +141,16 @@ class EvolutionLoop:
 
     def _run_seed_phase(self) -> None:
         print(f"[Gen 0] Seeding with {self.config.population_size} candidates...")
+
+        # Inject provided seed kernel before LLM candidates
+        if self.task.seed_kernel:
+            print("  Injecting seed kernel...")
+            record = self._evaluate_candidate(self.task.seed_kernel, generation=0, parent_id=None)
+            inserted = self.archive.insert(record)
+            self._record_transition(_SENTINEL_COORDS, record, inserted, generation=0)
+            self.all_records.append(record)
+            self._print_candidate_result("seed", record)
+
         prompt = self.constructor.build_seed_prompt(self.current_sections)
         responses = self.llm.generate(prompt, n=self.config.population_size)
 
