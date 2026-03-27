@@ -44,7 +44,7 @@ def reference_fn(
 
 
 def input_generator() -> tuple:
-    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.float32)
+    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.float32)
     bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
     return (x, weight, bias)
@@ -167,8 +167,8 @@ def build(config=None) -> TaskSpec:
         name="causal_conv1d",
         description=(
             f"Depthwise causal 1D convolution: out[b, c, t] = bias[c] + sum_w(weight[c, w] * x[b, c, t - (WIDTH-1) + w])\n"
-            f"Input x shape: ({BATCH}, {DIM}, {SEQLEN}), dtype: float32, device: CUDA\n"
-            f"Weight shape: ({DIM}, {WIDTH}), Bias shape: ({DIM},)\n"
+            f"Input x shape: ({BATCH}, {DIM}, {SEQLEN}), dtype: bfloat16, device: CUDA\n"
+            f"Weight shape: ({DIM}, {WIDTH}) dtype: float32, Bias shape: ({DIM},) dtype: float32\n"
             f"Causal: output at position t depends only on x[..., t-{WIDTH - 1}:t+1]\n"
             f"Apply fused SiLU activation after the convolution.\n"
             f"Baseline (F.conv1d depthwise): {baseline_time_ms:.3f}ms"
@@ -192,7 +192,7 @@ def _measure_baseline() -> float:
         benchmark_min_time=0.5,
         benchmark_min_iters=5,
     )
-    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.float32)
+    x = torch.randn(BATCH, DIM, SEQLEN, device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.float32)
     bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
     result = benchmarker.measure(
