@@ -19,9 +19,9 @@ import torch.nn.functional as F
 from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.task.spec import TaskSpec, detect_hardware_spec
 
-BATCH = 16
+BATCH = 4
 DIM = 2048
-SEQLEN = 8192
+SEQLEN = 4096
 WIDTH = 4
 
 
