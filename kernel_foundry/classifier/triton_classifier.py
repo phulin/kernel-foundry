@@ -20,6 +20,7 @@ class KernelFeatures:
     has_block_ptr: bool
     has_block_ptr_advance: bool
     has_tiled_dot_loop: bool
+    has_static_tiling_loop: bool
     has_pipeline: bool
     has_multi_dim_accumulator: bool
     has_online_state_names: bool
@@ -42,7 +43,6 @@ class TritonBehaviorClassifier:
     _SUGAR_REDUCTIONS = frozenset({"sum", "max", "min", "cumsum"})
     _TRANSCENDENTAL_ALIASES = {"exp2": "exp", "log2": "log"}
     _TRANSCENDENTALS = frozenset({"exp", "log", "sqrt", "rsqrt", "sigmoid"})
-    _ATOMICS = frozenset({"atomic_add", "atomic_max", "atomic_min", "atomic_cas", "atomic_xchg"})
 
     def classify(self, source_code: str) -> BehavioralCoords:
         features = self.extract_features(source_code)
@@ -68,6 +68,7 @@ class TritonBehaviorClassifier:
                 has_block_ptr=False,
                 has_block_ptr_advance=False,
                 has_tiled_dot_loop=False,
+                has_static_tiling_loop=False,
                 has_pipeline=False,
                 has_multi_dim_accumulator=False,
                 has_online_state_names=False,
@@ -88,6 +89,7 @@ class TritonBehaviorClassifier:
             has_block_ptr=self._has_block_ptr(tl_calls),
             has_block_ptr_advance=tl_calls.get("advance", 0) > 0,
             has_tiled_dot_loop=self._has_tiled_dot_loop(tree, tl_calls),
+            has_static_tiling_loop=self._has_static_tiling_loop(tree),
             has_pipeline=self._has_pipeline(source_code),
             has_multi_dim_accumulator=self._has_multi_dim_accumulator(tree),
             has_online_state_names=self._has_online_state_names(source_code),
@@ -129,6 +131,30 @@ class TritonBehaviorClassifier:
                     and func.attr == "dot"
                 ):
                     return True
+        return False
+
+    def _is_tl_static_range(self, node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "tl"
+            and node.func.attr == "static_range"
+        )
+
+    def _has_static_tiling_loop(self, tree: ast.AST) -> bool:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For) or not self._is_tl_static_range(node.iter):
+                continue
+            if any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == "tl"
+                and child.func.attr in {"load", "store"}
+                for child in ast.walk(node)
+            ):
+                return True
         return False
 
     def _has_pipeline(self, source_code: str) -> bool:
@@ -220,6 +246,8 @@ class TritonBehaviorClassifier:
         for node in ast.walk(tree):
             if not isinstance(node, ast.For):
                 continue
+            if self._is_tl_static_range(node.iter):
+                continue
             saw_augassign = False
             saw_load = False
             for child in ast.walk(node):
@@ -246,6 +274,7 @@ class TritonBehaviorClassifier:
                 1 if features.has_tiled_dot_loop else 0,
                 1 if features.has_block_ptr else 0,
                 1 if features.has_multi_dim_accumulator else 0,
+                1 if features.has_static_tiling_loop else 0,
             ]
         )
         multilevel_evidence = sum(
@@ -272,51 +301,46 @@ class TritonBehaviorClassifier:
         return 0
 
     def _classify_d_algo(self, features: KernelFeatures) -> int:
-        if features.jit_fn_count >= 2 and features.kernel_launch_count >= 2:
+        helper_jit = features.jit_fn_count >= 2
+        rich_autotune = features.tl_calls.get("cdiv", 0) >= 2 or features.for_loop_count > 0
+        multi_axis_meta = (
+            features.has_static_tiling_loop
+            or features.has_multi_dim_accumulator
+            or features.has_block_ptr
+            or features.has_online_state_updates
+        )
+
+        if features.kernel_launch_count >= 2 or (helper_jit and (rich_autotune or multi_axis_meta)):
             return 3
 
-        reformulation_evidence = sum(
-            [
-                1 if features.tl_calls.get("exp", 0) > 0 else 0,
-                1 if features.tl_calls.get("maximum", 0) > 0 else 0,
-                1 if features.has_online_state_names else 0,
-                1 if features.has_online_state_updates else 0,
-            ]
-        )
-        if reformulation_evidence >= 3:
+        if rich_autotune or multi_axis_meta:
             return 2
 
-        if self._count_op_categories(features.tl_calls) >= 2:
-            return 1
-        if features.tl_calls.get("dot", 0) > 0 or features.tl_calls.get("reduce", 0) > 0:
+        if features.has_pipeline or features.has_arange_indexing:
             return 1
         return 0
 
     def _classify_d_sync(self, features: KernelFeatures) -> int:
-        if any(features.tl_calls.get(name, 0) > 0 for name in self._ATOMICS):
-            return 3
-        if features.kernel_launch_count >= 2:
+        if features.kernel_launch_count >= 2 or features.tl_calls.get("program_id", 0) >= 3:
             return 3
 
-        if features.tl_calls.get("associative_scan", 0) > 0:
+        if features.has_static_tiling_loop:
+            return 3
+
+        if features.has_multi_dim_accumulator:
             return 2
-        if not features.has_tiled_dot_loop and features.tl_calls.get("reduce", 0) > 0:
+        if features.tl_calls.get("arange", 0) >= 2:
             return 2
-        if features.has_tiled_dot_loop and features.tl_calls.get("reduce", 0) > 1:
+        if self._has_multi_axis_broadcast(features):
             return 2
 
-        if features.tl_calls.get("debug_barrier", 0) > 0 or features.has_serial_accumulation_loop:
+        if features.tl_calls.get("arange", 0) >= 1 or features.tl_calls.get("program_id", 0) >= 1:
             return 1
         return 0
 
-    def _count_op_categories(self, tl_calls: dict[str, int]) -> int:
-        categories = 0
-        if any(tl_calls.get(name, 0) > 0 for name in self._TRANSCENDENTALS):
-            categories += 1
-        if tl_calls.get("dot", 0) > 0:
-            categories += 1
-        if tl_calls.get("reduce", 0) > 0 or tl_calls.get("associative_scan", 0) > 0:
-            categories += 1
-        if tl_calls.get("load", 0) > 0 or tl_calls.get("store", 0) > 0:
-            categories += 1
-        return categories
+    def _has_multi_axis_broadcast(self, features: KernelFeatures) -> bool:
+        return (
+            features.has_multi_dim_accumulator
+            or (features.tl_calls.get("arange", 0) >= 2 and features.load_count > 0)
+            or (features.has_pipeline and features.has_static_tiling_loop)
+        )

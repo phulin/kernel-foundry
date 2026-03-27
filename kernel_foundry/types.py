@@ -8,16 +8,16 @@ from typing import Literal
 @dataclass(frozen=True)
 class BehavioralCoords:
     d_mem: int   # 0–3: memory access pattern
-    d_algo: int  # 0–3: algorithmic structure
-    d_sync: int  # 0–3: parallelism coordination
+    d_algo: int  # 0–3: specialization / staging richness
+    d_sync: int  # 0–3: work-partition shape
 
     def to_tuple(self) -> tuple[int, int, int]:
         return (self.d_mem, self.d_algo, self.d_sync)
 
     def __repr__(self) -> str:
         mem_labels = ["scalar", "coalesced", "tiled", "multi-level"]
-        algo_labels = ["direct", "fused", "reformulated", "novel"]
-        sync_labels = ["none", "barrier", "sub-group", "global"]
+        algo_labels = ["minimal", "tuned", "specialized", "staged"]
+        sync_labels = ["scalar", "1d-blocked", "2d-tiled", "hierarchical"]
         return (
             f"BC(mem={self.d_mem}:{mem_labels[self.d_mem]}, "
             f"algo={self.d_algo}:{algo_labels[self.d_algo]}, "
