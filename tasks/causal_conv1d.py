@@ -21,7 +21,7 @@ from kernel_foundry.task.spec import TaskSpec, detect_hardware_spec
 
 BATCH = 4
 DIM = 2048
-SEQLEN = 4096
+SEQLEN = 2048
 WIDTH = 4
 
 
