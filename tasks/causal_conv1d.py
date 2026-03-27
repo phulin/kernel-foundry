@@ -19,10 +19,9 @@ import torch.nn.functional as F
 from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.task.spec import TaskSpec, detect_hardware_spec
 
-
-BATCH = 2
-DIM = 1024
-SEQLEN = 2048
+BATCH = 16
+DIM = 2048
+SEQLEN = 8192
 WIDTH = 4
 
 
@@ -60,7 +59,7 @@ def build(config=None) -> TaskSpec:
             f"Depthwise causal 1D convolution: out[b, c, t] = bias[c] + sum_w(weight[c, w] * x[b, c, t - (WIDTH-1) + w])\n"
             f"Input x shape: ({BATCH}, {DIM}, {SEQLEN}), dtype: float32, device: CUDA\n"
             f"Weight shape: ({DIM}, {WIDTH}), Bias shape: ({DIM},)\n"
-            f"Causal: output at position t depends only on x[..., t-{WIDTH-1}:t+1]\n"
+            f"Causal: output at position t depends only on x[..., t-{WIDTH - 1}:t+1]\n"
             f"No SiLU activation.\n"
             f"Baseline (F.conv1d depthwise): {baseline_time_ms:.3f}ms"
         ),
