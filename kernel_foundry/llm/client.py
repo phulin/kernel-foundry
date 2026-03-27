@@ -13,6 +13,9 @@ class LLMClient:
     def __init__(self, config: EvolutionConfig) -> None:
         self._config = config
         self._client = openai.OpenAI(api_key=config.openai_api_key)
+        self.tokens_input = 0
+        self.tokens_output = 0
+        self.tokens_cached = 0
 
     def generate(
         self,
@@ -42,6 +45,12 @@ class LLMClient:
                     max_completion_tokens=self._config.llm_max_tokens,
                     top_p=self._config.llm_top_p,
                 )
+                if response.usage:
+                    self.tokens_input += response.usage.prompt_tokens
+                    self.tokens_output += response.usage.completion_tokens
+                    details = response.usage.prompt_tokens_details
+                    if details and details.cached_tokens:
+                        self.tokens_cached += details.cached_tokens
                 return [choice.message.content or "" for choice in response.choices]
             except openai.RateLimitError:
                 wait = 2 ** (attempt + 1)

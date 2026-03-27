@@ -128,6 +128,13 @@ class EvolutionLoop:
             speedup_str = f"{best.eval_result.speedup:.2f}x" if best.eval_result.speedup is not None else "N/A"
             print(f"Best kernel: speedup={speedup_str} | coords={best.coords}")
             print(f"{'='*60}")
+
+        t = self.llm
+        print(
+            f"\nTokens — input: {t.tokens_input:,}  output: {t.tokens_output:,}"
+            f"  cached: {t.tokens_cached:,}"
+            f"  total: {t.tokens_input + t.tokens_output:,}"
+        )
         return best
 
     # ------------------------------------------------------------------ phases
