@@ -50,7 +50,10 @@ class MAPElitesArchive:
     def get_best_overall(self) -> KernelRecord | None:
         if not self._grid:
             return None
-        return max(self._grid.values(), key=lambda r: r.eval_result.fitness)
+        return max(
+            self._grid.values(),
+            key=lambda r: (r.eval_result.fitness, r.eval_result.speedup or 0.0),
+        )
 
     def get_fitness(self, coords: BehavioralCoords) -> float:
         record = self._grid.get(coords.to_tuple())
