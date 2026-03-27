@@ -34,12 +34,13 @@ def reference_fn(
     # weight: (dim, width) — depthwise filter per channel
     # Causal padding: pad (width-1) on the left, 0 on the right
     x_padded = F.pad(x, (WIDTH - 1, 0))
-    return F.conv1d(
+    out = F.conv1d(
         x_padded,
         weight.unsqueeze(1),  # (dim, 1, width)
         bias=bias,
         groups=DIM,
     )
+    return F.silu(out)
 
 
 def input_generator() -> tuple:
@@ -149,7 +150,7 @@ def kernel_fn(x, weight, bias):
         bias.stride(0),
         out.stride(0), out.stride(1), out.stride(2),
         HAS_BIAS=True,
-        SILU_ACTIVATION=False,
+        SILU_ACTIVATION=True,
         WIDTH=width,
         BLOCK_C=BLOCK_C,
         BLOCK_L=BLOCK_L,
@@ -169,7 +170,7 @@ def build(config=None) -> TaskSpec:
             f"Input x shape: ({BATCH}, {DIM}, {SEQLEN}), dtype: float32, device: CUDA\n"
             f"Weight shape: ({DIM}, {WIDTH}), Bias shape: ({DIM},)\n"
             f"Causal: output at position t depends only on x[..., t-{WIDTH - 1}:t+1]\n"
-            f"No SiLU activation.\n"
+            f"Apply fused SiLU activation after the convolution.\n"
             f"Baseline (F.conv1d depthwise): {baseline_time_ms:.3f}ms"
         ),
         reference_code=inspect.getsource(reference_fn),
@@ -195,11 +196,13 @@ def _measure_baseline() -> float:
     weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.float32)
     bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
     result = benchmarker.measure(
-        lambda x, w, b: F.conv1d(
-            F.pad(x, (WIDTH - 1, 0)),
-            w.unsqueeze(1),
-            bias=b,
-            groups=DIM,
+        lambda x, w, b: F.silu(
+            F.conv1d(
+                F.pad(x, (WIDTH - 1, 0)),
+                w.unsqueeze(1),
+                bias=b,
+                groups=DIM,
+            )
         ),
         (x, weight, bias),
     )
