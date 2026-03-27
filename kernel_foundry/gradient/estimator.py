@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 
 import numpy as np
@@ -114,8 +115,27 @@ class GradientEstimator:
     # ------------------------------------------------------------------ internals
 
     def _temporal_weight(self, record: TransitionRecord) -> float:
-        age = self._current_generation - record.generation
-        return math.pow(self._decay, max(age, 0))
+        # Use wall-clock age via the stored timestamp, normalised by the observed
+        # generation cadence so that ``decay`` retains its per-generation semantics.
+        gen_duration_s = self._estimate_gen_duration_s()
+        age_s = time.time() - record.timestamp
+        age_gens = age_s / gen_duration_s
+        return math.pow(self._decay, max(age_gens, 0))
+
+    def _estimate_gen_duration_s(self) -> float:
+        """Mean wall-clock seconds per generation from buffer timestamps.
+
+        Requires at least 2 records spanning > 1 s; falls back to 60 s otherwise
+        (e.g. in tests where all records are created synchronously).
+        """
+        records = list(self._buffer._records)
+        if len(records) < 2:
+            return 60.0
+        span_s = records[-1].timestamp - records[0].timestamp
+        span_gen = records[-1].generation - records[0].generation
+        if span_gen <= 0 or span_s < 1.0:
+            return 60.0
+        return span_s / span_gen
 
     def _combined_gradient(
         self,

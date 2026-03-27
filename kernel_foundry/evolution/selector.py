@@ -69,41 +69,20 @@ class CuriosityDrivenSelector:
 
 class IslandSelector:
     """
-    Maintains K independent sub-populations with periodic migration.
-    Each call selects from the current island; islands rotate every migration_freq calls.
-    """
+    Uniform selection from the currently active island's occupied cells.
 
-    def __init__(self, n_islands: int = 4, migration_freq: int = 10) -> None:
-        self._n_islands = n_islands
-        self._migration_freq = migration_freq
-        self._call_count = 0
-        self._current_island = 0
-        # Island assignments are rebuilt lazily on each call
-        self._island_cells: list[list[BehavioralCoords]] = []
+    Island rotation and cross-island migration are managed by
+    ``IslandArchive.advance_generation()``, which is called by the evolution loop
+    once per generation.  This selector therefore just needs to pick uniformly from
+    whatever cells the archive exposes — ``archive.get_occupied_cells()`` already
+    returns only the current island's cells when an ``IslandArchive`` is in use.
+    """
 
     def select(self, archive, gradient_estimator, rng) -> BehavioralCoords | None:
         occupied = archive.get_occupied_cells()
         if not occupied:
             return None
-
-        self._call_count += 1
-        if self._call_count % self._migration_freq == 0:
-            self._current_island = (self._current_island + 1) % self._n_islands
-            self._island_cells = []  # force rebuild
-
-        # Rebuild island partition if stale
-        if not self._island_cells or sum(len(i) for i in self._island_cells) != len(occupied):
-            shuffled = occupied.copy()
-            rng.shuffle(shuffled)
-            self._island_cells = [[] for _ in range(self._n_islands)]
-            for i, cell in enumerate(shuffled):
-                self._island_cells[i % self._n_islands].append(cell)
-
-        island_cells = self._island_cells[self._current_island % len(self._island_cells)]
-        if not island_cells:
-            island_cells = occupied  # fallback
-
-        return island_cells[rng.integers(len(island_cells))]
+        return occupied[rng.integers(len(occupied))]
 
 
 def make_selector(config: EvolutionConfig) -> Selector:
@@ -115,6 +94,6 @@ def make_selector(config: EvolutionConfig) -> Selector:
     elif strategy == "curiosity":
         return CuriosityDrivenSelector()
     elif strategy == "island":
-        return IslandSelector(config.island_count, config.island_migration_freq)
+        return IslandSelector()
     else:
         raise ValueError(f"Unknown selection strategy: {strategy!r}")

@@ -122,6 +122,10 @@ Respond with a single Python code block containing the autotuned version."""
             )
             parts.append(f"## Current Best Kernel (speedup: {speedup_str})")
             parts.append(f"Behavioral coords: {best_kernel.coords}")
+            if best_kernel.eval_result.profiling_summary:
+                parts.append(f"Profiling: {best_kernel.eval_result.profiling_summary}")
+            if best_kernel.template_configs:
+                parts.append(self._format_template_configs(best_kernel.template_configs))
             parts.append("```python")
             parts.append(best_kernel.source_code)
             parts.append("```")
@@ -141,6 +145,10 @@ Respond with a single Python code block containing the autotuned version."""
             )
             parts.append(f"## Parent Kernel to Improve ({parent_status})")
             parts.append(f"Behavioral coords: {parent_kernel.coords}")
+            if parent_kernel.eval_result.profiling_summary:
+                parts.append(f"Profiling: {parent_kernel.eval_result.profiling_summary}")
+            if parent_kernel.template_configs:
+                parts.append(self._format_template_configs(parent_kernel.template_configs))
             parts.append("```python")
             parts.append(parent_kernel.source_code)
             parts.append("```")
@@ -189,3 +197,19 @@ Respond with a single Python code block containing the autotuned version."""
             )
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _format_template_configs(configs: list[dict]) -> str:
+        lines = ["Config sweep results (✓=correct, ✗=incorrect):"]
+        for cfg in configs[:8]:  # cap to avoid token bloat
+            correct = "✓" if cfg.get("correct") else "✗"
+            speedup = f"{cfg['speedup']:.2f}x" if cfg.get("speedup") else "N/A"
+            raw = cfg.get("config", {})
+            kwargs = raw.get("kwargs") or {}
+            params = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+            if raw.get("num_warps") is not None:
+                params += f", num_warps={raw['num_warps']}"
+            if raw.get("num_stages") is not None:
+                params += f", num_stages={raw['num_stages']}"
+            lines.append(f"  {correct} {params} → {speedup}")
+        return "\n".join(lines)

@@ -1,4 +1,6 @@
+import numpy as np
 import pytest
+from kernel_foundry.archive.island_archive import IslandArchive
 from kernel_foundry.archive.map_elites import MAPElitesArchive
 from kernel_foundry.archive.prompt_archive import PromptArchive
 from kernel_foundry.types import BehavioralCoords
@@ -32,6 +34,14 @@ class TestMAPElitesArchive:
         a = MAPElitesArchive()
         r_low = make_record(1, 0, 0, speedup=1.5, kid="low")
         r_high = make_record(1, 0, 0, speedup=2.5, kid="high")
+        a.insert(r_low)
+        assert a.insert(r_high) is True
+        assert a.get_elite(BehavioralCoords(1, 0, 0)).kernel_id == "high"
+
+    def test_equal_fitness_higher_speedup_replaces_incumbent(self):
+        a = MAPElitesArchive()
+        r_low = make_record(1, 0, 0, speedup=5.33, kid="low")
+        r_high = make_record(1, 0, 0, speedup=5.66, kid="high")
         a.insert(r_low)
         assert a.insert(r_high) is True
         assert a.get_elite(BehavioralCoords(1, 0, 0)).kernel_id == "high"
@@ -138,3 +148,100 @@ class TestPromptArchive:
     def test_get_best_variant_empty_returns_none(self):
         pa = PromptArchive(capacity=5)
         assert pa.get_best_variant() is None
+
+    def test_get_active_variant_empty_returns_none(self):
+        pa = PromptArchive(capacity=5)
+        rng = np.random.default_rng(0)
+        assert pa.get_active_variant(rng) is None
+
+    def test_get_active_variant_explores_with_epsilon(self):
+        rng = np.random.default_rng(42)
+        pa = PromptArchive(capacity=10)
+        v1 = pa.insert(DEFAULT_SECTIONS, generation=0)
+        v2 = pa.insert(DEFAULT_SECTIONS, generation=1)
+        pa.update_fitness(v1.variant_id, 0.9)  # v1 is best
+        # With epsilon=1.0 (always explore), should sometimes return v2
+        seen = set()
+        for _ in range(50):
+            v = pa.get_active_variant(rng, epsilon=1.0)
+            seen.add(v.variant_id)
+        assert v2.variant_id in seen
+
+    def test_get_active_variant_exploits_with_zero_epsilon(self):
+        rng = np.random.default_rng(42)
+        pa = PromptArchive(capacity=10)
+        v1 = pa.insert(DEFAULT_SECTIONS, generation=0)
+        pa.insert(DEFAULT_SECTIONS, generation=1)
+        pa.update_fitness(v1.variant_id, 0.9)
+        # With epsilon=0 (always exploit), should always return best
+        for _ in range(20):
+            v = pa.get_active_variant(rng, epsilon=0.0)
+            assert v.variant_id == v1.variant_id
+
+
+# ──────────────────────────────────────────── IslandArchive
+
+class TestIslandArchive:
+    def test_insert_into_current_island(self):
+        ia = IslandArchive(n_islands=2, bins=4)
+        from tests.conftest import make_record
+        assert ia.insert(make_record(1, 0, 0, speedup=1.5)) is True
+        assert ia.size() == 1
+
+    def test_islands_are_isolated_before_migration(self):
+        from tests.conftest import make_record
+        ia = IslandArchive(n_islands=2, migration_freq=10, bins=4)
+        ia.insert(make_record(1, 0, 0, speedup=2.0, kid="i0"))
+        # Switch to island 1 manually — it should be empty
+        ia._current = 1
+        assert ia.size() == 0
+
+    def test_migration_broadcasts_elites_to_all_islands(self):
+        from tests.conftest import make_record
+        ia = IslandArchive(n_islands=2, migration_freq=5, bins=4)
+        ia.insert(make_record(1, 0, 0, speedup=2.0, kid="i0_elite"))
+        ia._current = 1
+        ia.insert(make_record(2, 1, 0, speedup=1.5, kid="i1_elite"))
+        ia._current = 0
+        ia._migrate()
+        # Island 0 should now have i1's elite
+        ia._current = 0
+        assert ia.get_elite(BehavioralCoords(2, 1, 0)) is not None
+        # Island 1 should now have i0's elite
+        ia._current = 1
+        assert ia.get_elite(BehavioralCoords(1, 0, 0)) is not None
+
+    def test_advance_generation_triggers_at_migration_freq(self):
+        from tests.conftest import make_record
+        ia = IslandArchive(n_islands=2, migration_freq=5, bins=4)
+        ia.insert(make_record(1, 0, 0, speedup=2.0))
+        initial_island = ia._current
+        for gen in range(1, 6):  # gen 5 triggers migration
+            ia.advance_generation(gen)
+        assert ia._current != initial_island
+
+    def test_get_best_overall_across_islands(self):
+        from tests.conftest import make_record
+        ia = IslandArchive(n_islands=2, bins=4)
+        ia.insert(make_record(0, 0, 0, speedup=1.5, kid="low"))
+        ia._current = 1
+        ia.insert(make_record(1, 1, 0, speedup=3.0, kid="high"))
+        ia._current = 0
+        best = ia.get_best_overall()
+        assert best.kernel_id == "high"
+
+    def test_get_all_elites_deduplicates_by_fitness(self):
+        from tests.conftest import make_record
+        ia = IslandArchive(n_islands=2, bins=4)
+        ia.insert(make_record(1, 0, 0, speedup=1.5, kid="low"))
+        ia._current = 1
+        ia.insert(make_record(1, 0, 0, speedup=2.5, kid="high"))
+        ia._current = 0
+        elites = ia.get_all_elites()
+        kids = {r.kernel_id for r in elites}
+        assert "high" in kids
+        assert "low" not in kids
+
+    def test_best_overall_empty_returns_none(self):
+        ia = IslandArchive(n_islands=3, bins=4)
+        assert ia.get_best_overall() is None

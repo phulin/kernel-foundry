@@ -6,7 +6,9 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+import torch
 
+from kernel_foundry.archive.island_archive import IslandArchive
 from kernel_foundry.archive.map_elites import MAPElitesArchive
 from kernel_foundry.archive.prompt_archive import PromptArchive
 from kernel_foundry.classifier.triton_classifier import TritonBehaviorClassifier
@@ -51,8 +53,15 @@ class EvolutionLoop:
         self._records_path = records_path
         self._flushed_count = 0
 
-        # Core components
-        self.archive = MAPElitesArchive(bins=config.archive_bins)
+        # Core components — use IslandArchive when island selection is active (fix 3)
+        if config.selection_strategy == "island":
+            self.archive: MAPElitesArchive | IslandArchive = IslandArchive(
+                n_islands=config.island_count,
+                migration_freq=config.island_migration_freq,
+                bins=config.archive_bins,
+            )
+        else:
+            self.archive = MAPElitesArchive(bins=config.archive_bins)
         self.prompt_archive = PromptArchive(capacity=config.prompt_archive_size)
         self.transition_buffer = TransitionBuffer(config.transition_buffer_size)
         self.gradient_estimator = GradientEstimator(
@@ -171,6 +180,10 @@ class EvolutionLoop:
         self._flush_records()
 
     def _run_generation(self, gen: int) -> None:
+        # Island rotation and migration when applicable (fix 3)
+        if isinstance(self.archive, IslandArchive):
+            self.archive.advance_generation(gen)
+
         # Select parent
         parent_coords = self.selector.select(self.archive, self.gradient_estimator, self.rng)
         parent_record = self.archive.get_elite(parent_coords) if parent_coords else None
@@ -186,8 +199,8 @@ class EvolutionLoop:
                 bins=self.archive.bins,
             )
 
-        # Get active prompt sections
-        active_variant = self.prompt_archive.get_best_variant()
+        # Get active prompt sections — epsilon-greedy so new variants get a chance (fix 4)
+        active_variant = self.prompt_archive.get_active_variant(self.rng)
         sections = active_variant.sections if active_variant else self.current_sections
 
         # Build prompt and generate
@@ -240,6 +253,9 @@ class EvolutionLoop:
         improved = 0
         for record in list(self.archive.get_all_elites()):
             if not self.template_optimizer.is_templated(record.source_code):
+                continue
+            if record.template_configs is not None:
+                # Already swept during evaluation; no need to re-sweep
                 continue
             print(f"  Sweeping autotuned kernel at {record.coords}...")
             results = self.template_optimizer.sweep(
@@ -315,6 +331,15 @@ class EvolutionLoop:
             result.kernel_time_ms = bench.mean_ms
             result.baseline_time_ms = self.task.baseline_time_ms
             result.speedup = self.task.baseline_time_ms / bench.mean_ms
+            # Profiling summary (fix 2): effective bandwidth from input tensor sizes
+            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
+            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
+            result.profiling_summary = (
+                f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
+                f"(n={bench.num_iters}) | "
+                f"input={input_bytes/1e6:.2f}MB | "
+                f"eff_bw={eff_bw_gbs:.1f}GB/s"
+            )
         except Exception:
             result.error_log = traceback.format_exc(limit=6)
             result.fitness = compute_fitness(result, self.config.target_speedup)
@@ -328,6 +353,34 @@ class EvolutionLoop:
             )
 
         result.fitness = compute_fitness(result, self.config.target_speedup)
+
+        # Template config sweep for per-config LLM feedback (fix 1).
+        # Run the explicit sweep so the LLM can learn which triton.Config entries
+        # worked and which didn't; use the best sweep result if it beats Triton's
+        # native autotuner result.
+        is_templated = False
+        template_configs: list[dict] | None = None
+        if self.template_optimizer.is_templated(source_code):
+            is_templated = True
+            sweep_results = self.template_optimizer.sweep(
+                source_code, kernel_id_prefix=kernel_id
+            )
+            if sweep_results:
+                template_configs = [
+                    {
+                        "config": r.config,
+                        "speedup": r.eval_result.speedup,
+                        "correct": r.eval_result.correct,
+                        "kernel_time_ms": r.eval_result.kernel_time_ms,
+                    }
+                    for r in sweep_results
+                ]
+                best_sweep = max(sweep_results, key=lambda r: r.eval_result.fitness)
+                if best_sweep.eval_result.fitness > result.fitness:
+                    result.kernel_time_ms = best_sweep.eval_result.kernel_time_ms
+                    result.speedup = best_sweep.eval_result.speedup
+                    result.fitness = best_sweep.eval_result.fitness
+
         return KernelRecord(
             kernel_id=kernel_id,
             generation=generation,
@@ -335,6 +388,8 @@ class EvolutionLoop:
             source_code=source_code,
             coords=coords,
             eval_result=result,
+            is_templated=is_templated,
+            template_configs=template_configs,
         )
 
     def _record_transition(
@@ -383,7 +438,7 @@ class EvolutionLoop:
             if best and best.eval_result.speedup
             else "no correct kernel yet"
         )
-        print(f"[Gen {gen:3d}] archive={self.archive.size()}/64 | {best_str}")
+        print(f"[Gen {gen:3d}] archive={self.archive.size()}/{self.archive.bins**3} | {best_str}")
 
     # ------------------------------------------------------------------ records / checkpoint
 

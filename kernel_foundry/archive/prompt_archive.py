@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import uuid
 
+import numpy as np
+
 from kernel_foundry.types import EvolvableSections, PromptVariant
 
 
@@ -38,6 +40,23 @@ class PromptArchive:
     def get_best_variant(self) -> PromptVariant | None:
         if not self._variants:
             return None
+        return max(self._variants.values(), key=lambda v: v.best_fitness)
+
+    def get_active_variant(
+        self, rng: np.random.Generator, epsilon: float = 0.2
+    ) -> PromptVariant | None:
+        """Epsilon-greedy selection: explore a random variant with probability ``epsilon``,
+        otherwise exploit the highest-fitness variant.
+
+        This gives newly evolved prompt variants a chance to be used before they have
+        accumulated any fitness signal, preventing the prompt archive from collapsing
+        to the first successful variant.
+        """
+        if not self._variants:
+            return None
+        if rng.random() < epsilon:
+            variants = list(self._variants.values())
+            return variants[int(rng.integers(len(variants)))]
         return max(self._variants.values(), key=lambda v: v.best_fitness)
 
     def get_active_variant_id(self) -> str | None:

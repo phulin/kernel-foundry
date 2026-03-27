@@ -20,10 +20,22 @@ class MAPElitesArchive:
         """Insert if cell empty or record improves on incumbent. Returns True if updated."""
         key = record.coords.to_tuple()
         incumbent = self._grid.get(key)
-        if incumbent is None or record.eval_result.fitness > incumbent.eval_result.fitness:
+        if incumbent is None or self._is_better(record, incumbent):
             self._grid[key] = record
             return True
         return False
+
+    @staticmethod
+    def _is_better(candidate: KernelRecord, incumbent: KernelRecord) -> bool:
+        candidate_key = (
+            candidate.eval_result.fitness,
+            candidate.eval_result.speedup or 0.0,
+        )
+        incumbent_key = (
+            incumbent.eval_result.fitness,
+            incumbent.eval_result.speedup or 0.0,
+        )
+        return candidate_key > incumbent_key
 
     def get_elite(self, coords: BehavioralCoords) -> KernelRecord | None:
         return self._grid.get(coords.to_tuple())

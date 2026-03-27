@@ -112,18 +112,11 @@ class TestIslandSelector:
     def test_empty_returns_none(self, empty_archive, estimator, rng):
         assert IslandSelector().select(empty_archive, estimator, rng) is None
 
-    def test_rotates_islands_after_migration_freq(self, populated_archive, estimator, rng):
-        sel = IslandSelector(n_islands=2, migration_freq=3)
-        islands_seen = set()
-        for _ in range(10):
-            result = sel.select(populated_archive, estimator, rng)
-            islands_seen.add(sel._current_island)
-        # Should have visited both islands
-        assert len(islands_seen) > 1
-
     def test_returns_occupied_cell(self, populated_archive, estimator, rng):
+        # Island rotation/migration is now managed by IslandArchive.advance_generation();
+        # the selector just picks uniformly from the current archive's occupied cells.
         occupied = set(c.to_tuple() for c in populated_archive.get_occupied_cells())
-        sel = IslandSelector(n_islands=3, migration_freq=2)
+        sel = IslandSelector()
         for _ in range(20):
             result = sel.select(populated_archive, estimator, rng)
             assert result.to_tuple() in occupied
