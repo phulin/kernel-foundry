@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 @dataclass
 class EvolutionConfig:
     # LLM
-    llm_model: str = "gpt-5.3-codex"
-    meta_prompter_model: str = "gpt-5.3-codex"
+    llm_model: str = "gpt-5.4"
+    meta_prompter_model: str = "gpt-5.4"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 8000
     llm_top_p: float = 1.0
