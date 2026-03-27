@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 @dataclass
 class EvolutionConfig:
     # LLM
-    llm_model: str = "gpt-4o"
-    meta_prompter_model: str = "gpt-4o"
+    llm_model: str = "gpt-5.3-codex"
+    meta_prompter_model: str = "gpt-5.3-codex"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 8000
     llm_top_p: float = 1.0
@@ -19,7 +19,9 @@ class EvolutionConfig:
     # Evolution
     max_generations: int = 40
     population_size: int = 8
-    selection_strategy: Literal["uniform", "fitness", "curiosity", "island"] = "curiosity"
+    selection_strategy: Literal["uniform", "fitness", "curiosity", "island"] = (
+        "curiosity"
+    )
     target_speedup: float = 2.0
 
     # Archive (bins per dimension → bins^3 cells total)
