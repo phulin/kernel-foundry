@@ -55,7 +55,16 @@ class MetaPrompter:
                 status = f"INCORRECT: {r.eval_result.error_log[:150]}"
             else:
                 status = f"correct, speedup={r.eval_result.speedup:.2f}x"
-            outcome_lines.append(f"  - Gen {r.generation} [{r.coords}]: {status}")
+            outcome_lines.append(
+                "\n".join(
+                    [
+                        f"  - Gen {r.generation} [{r.coords}]: {status}",
+                        "    ```python",
+                        r.source_code[:1200],
+                        "    ```",
+                    ]
+                )
+            )
 
         outcomes_text = "\n".join(outcome_lines)
 

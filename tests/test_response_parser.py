@@ -1,5 +1,8 @@
 import pytest
 from kernel_foundry.llm.response_parser import extract_triton_code, extract_search_replace_diffs
+from kernel_foundry.prompt.evolvable_sections import DEFAULT_SECTIONS
+from kernel_foundry.prompt.meta_prompter import MetaPrompter
+from tests.conftest import make_record
 
 VALID_KERNEL = """\
 import triton
@@ -115,3 +118,13 @@ class TestApplySearchReplace:
         new = apply_search_replace(DEFAULT_SECTIONS, diffs)
         assert "A: memory bandwidth" in new.optimization_philosophy
         assert "B: data reuse" in new.optimization_philosophy
+
+
+class TestMetaPrompterPrompt:
+    def test_meta_prompt_includes_kernel_code(self):
+        mp = MetaPrompter(llm=None)  # type: ignore[arg-type]
+        record = make_record(1, 1, 0, speedup=1.8)
+        record.source_code = VALID_KERNEL
+        prompt = mp._build_meta_prompt(DEFAULT_SECTIONS, [record])
+        assert "```python" in prompt
+        assert "@triton.jit" in prompt

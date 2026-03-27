@@ -55,7 +55,11 @@ class CuriosityDrivenSelector:
             return occupied[rng.integers(len(occupied))]
 
         fitnesses = {c: archive.get_fitness(c) for c in occupied}
-        weights_dict = gradient_estimator.compute_sampling_weights(occupied, fitnesses)
+        weights_dict = gradient_estimator.compute_sampling_weights(
+            occupied,
+            fitnesses,
+            bins=archive.bins,
+        )
         weights = np.array([weights_dict.get(c, 1.0) for c in occupied])
         weights = np.maximum(weights, 1e-6)
         probs = weights / weights.sum()

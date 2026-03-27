@@ -286,7 +286,7 @@ wheels = [
 [[package]]
 name = "kernel-foundry"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "numpy" },
     { name = "openai" },
@@ -298,11 +298,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", specifier = ">=2.2" },
     { name = "openai", specifier = ">=1.50" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "torch", specifier = ">=2.1" },
+    { name = "torch", specifier = ">=2.9" },
     { name = "triton", specifier = ">=3.0" },
 ]
 

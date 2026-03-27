@@ -26,6 +26,42 @@ def kernel_fn(x):
 """.strip()
 
 
+class TestFeatureExtraction:
+    def test_extract_features_for_coalesced_kernel(self, clf):
+        code = _kernel(
+            "    pid = tl.program_id(0)\n"
+            "    offs = pid * BLOCK + tl.arange(0, BLOCK)\n"
+            "    tl.multiple_of(offs, BLOCK)\n"
+            "    x = tl.load(x_ptr + offs)\n"
+            "    tl.store(out_ptr + offs, x)"
+        )
+        features = clf.extract_features(code)
+        assert features.has_arange_indexing is True
+        assert features.has_alignment_hint is True
+        assert features.load_count == 1
+        assert features.store_count == 1
+
+    def test_extract_features_for_tiled_kernel(self, clf):
+        code = """
+import triton, triton.language as tl, torch
+@triton.autotune(configs=[triton.Config({'BK': 32}, num_stages=3)], key=['K'])
+@triton.jit
+def matmul(a_ptr, b_ptr, c_ptr, M, N, K, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        a = tl.load(a_ptr + k)
+        b = tl.load(b_ptr + k)
+        acc = tl.dot(a, b, acc)
+    tl.store(c_ptr, acc)
+def kernel_fn(a, b):
+    return torch.zeros(1)
+"""
+        features = clf.extract_features(code)
+        assert features.has_tiled_dot_loop is True
+        assert features.has_pipeline is True
+        assert features.has_multi_dim_accumulator is True
+
+
 # ──────────────────────────────────────────── d_mem
 
 class TestMemoryDimension:
@@ -41,6 +77,13 @@ class TestMemoryDimension:
             "    tl.store(out_ptr + offs, x, mask=offs < n)"
         )
         assert clf.classify(code).d_mem == 1
+
+    def test_scalar_load_without_contiguous_signal_is_zero(self, clf):
+        code = _kernel(
+            "    x = tl.load(x_ptr)\n"
+            "    tl.store(out_ptr, x)"
+        )
+        assert clf.classify(code).d_mem == 0
 
     def test_tiled_dot_loop_is_two(self, clf):
         code = """
@@ -74,6 +117,22 @@ def kernel_fn(a, b):
     return torch.zeros(1)
 """
         assert clf.classify(code).d_mem == 3
+
+    def test_block_ptr_counts_as_tiled_memory(self, clf):
+        code = """
+import triton, triton.language as tl, torch
+@triton.jit
+def blocked(a_ptr, out_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr):
+    block = tl.make_block_ptr(
+        base=a_ptr, shape=(M, N), strides=(N, 1), offsets=(0, 0),
+        block_shape=(BM, BN), order=(1, 0)
+    )
+    x = tl.load(block)
+    tl.store(out_ptr, x)
+def kernel_fn(a):
+    return torch.zeros(1)
+"""
+        assert clf.classify(code).d_mem >= 2
 
 
 # ──────────────────────────────────────────── d_algo
@@ -134,14 +193,32 @@ def kernel_fn(q, k, v):
         assert clf.classify(code).d_algo == 2
 
     def test_running_max_variable_name_triggers_two(self, clf):
-        # m_i variable name heuristic
+        # Names alone should not trigger reformulation.
         code = _kernel(
             "    m_i = tl.zeros([BLOCK], dtype=tl.float32)\n"
             "    l_i = tl.zeros([BLOCK], dtype=tl.float32)\n"
             "    x = tl.load(x_ptr)\n"
             "    tl.store(out_ptr, m_i)"
         )
-        assert clf.classify(code).d_algo == 2
+        assert clf.classify(code).d_algo == 0
+
+    def test_multi_kernel_pipeline_is_novel(self, clf):
+        code = """
+import triton, triton.language as tl, torch
+@triton.jit
+def stage1(x_ptr, tmp_ptr, n, BLOCK: tl.constexpr):
+    pass
+@triton.jit
+def stage2(tmp_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pass
+def kernel_fn(x):
+    tmp = torch.empty_like(x)
+    out = torch.empty_like(x)
+    stage1[(1,)](x, tmp, x.numel(), BLOCK=128)
+    stage2[(1,)](tmp, out, x.numel(), BLOCK=128)
+    return out
+"""
+        assert clf.classify(code).d_algo == 3
 
 
 # ──────────────────────────────────────────── d_sync
@@ -162,6 +239,20 @@ class TestSyncDimension:
             "    tl.debug_barrier()\n"
             "    tl.store(out_ptr, x)"
         )
+        assert clf.classify(code).d_sync == 1
+
+    def test_serial_accumulation_loop_is_one(self, clf):
+        code = """
+import triton, triton.language as tl, torch
+@triton.jit
+def seq_red(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    acc = 0.0
+    for i in range(0, BLOCK):
+        acc += tl.load(x_ptr + i)
+    tl.store(out_ptr, acc)
+def kernel_fn(x):
+    return torch.zeros(1)
+"""
         assert clf.classify(code).d_sync == 1
 
     def test_associative_scan_is_two(self, clf):
@@ -253,6 +344,24 @@ def kernel_fn(a, b):
 """
         c = clf.classify(code)
         assert c.d_sync == 2
+
+    def test_multi_kernel_launches_are_global_sync(self, clf):
+        code = """
+import triton, triton.language as tl, torch
+@triton.jit
+def stage1(x_ptr, tmp_ptr, n, BLOCK: tl.constexpr):
+    pass
+@triton.jit
+def stage2(tmp_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pass
+def kernel_fn(x):
+    tmp = torch.empty_like(x)
+    out = torch.empty_like(x)
+    stage1[(1,)](x, tmp, x.numel(), BLOCK=128)
+    stage2[(1,)](tmp, out, x.numel(), BLOCK=128)
+    return out
+"""
+        assert clf.classify(code).d_sync == 3
 
 
 # ──────────────────────────────────────────── edge cases

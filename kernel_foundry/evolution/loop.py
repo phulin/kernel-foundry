@@ -180,7 +180,11 @@ class EvolutionLoop:
         hints = []
         if parent_coords and self.archive.size() >= 3:
             fitnesses = {c: self.archive.get_fitness(c) for c in self.archive.get_occupied_cells()}
-            hints = self.gradient_estimator.gradient_to_hints(parent_coords, fitnesses)
+            hints = self.gradient_estimator.gradient_to_hints(
+                parent_coords,
+                fitnesses,
+                bins=self.archive.bins,
+            )
 
         # Get active prompt sections
         active_variant = self.prompt_archive.get_best_variant()

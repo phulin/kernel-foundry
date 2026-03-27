@@ -126,3 +126,11 @@ class TestGradientEstimator:
         pure_est.tick(20)
         pure_weights = pure_est.compute_sampling_weights(occupied, fitnesses)
         assert weights[BehavioralCoords(0,0,0)] <= pure_weights[BehavioralCoords(0,0,0)]
+
+    def test_exploration_gradient_accounts_for_empty_cells(self, buf):
+        estimator = GradientEstimator(buf, weights=(0.0, 0.0, 1.0))
+        estimator.tick(0)
+        occupied = [BehavioralCoords(0, 0, 0)]
+        fitnesses = {BehavioralCoords(0, 0, 0): 1.0}
+        weights = estimator.compute_sampling_weights(occupied, fitnesses, bins=4)
+        assert weights[BehavioralCoords(0, 0, 0)] > 1e-6

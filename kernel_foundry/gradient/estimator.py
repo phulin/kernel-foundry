@@ -68,7 +68,10 @@ class GradientEstimator:
         self._current_generation = generation
 
     def compute_sampling_weights(
-        self, occupied: list[BehavioralCoords], archive_fitnesses: dict[BehavioralCoords, float]
+        self,
+        occupied: list[BehavioralCoords],
+        archive_fitnesses: dict[BehavioralCoords, float],
+        bins: int = 4,
     ) -> dict[BehavioralCoords, float]:
         """
         Return per-cell sampling weight proportional to |combined gradient|.
@@ -79,7 +82,7 @@ class GradientEstimator:
 
         weights = {}
         for coords in occupied:
-            grad = self._combined_gradient(coords, archive_fitnesses)
+            grad = self._combined_gradient(coords, archive_fitnesses, bins=bins)
             weights[coords] = float(np.linalg.norm(grad)) + 1e-6  # avoid zero weights
         return weights
 
@@ -87,10 +90,11 @@ class GradientEstimator:
         self,
         coords: BehavioralCoords,
         archive_fitnesses: dict[BehavioralCoords, float],
+        bins: int = 4,
         max_hints: int = 2,
     ) -> list[str]:
         """Convert gradient direction into natural-language mutation hints."""
-        grad = self._combined_gradient(coords, archive_fitnesses)
+        grad = self._combined_gradient(coords, archive_fitnesses, bins=bins)
         hints = []
         # Sort dimensions by absolute gradient magnitude, descending
         for dim in np.argsort(np.abs(grad))[::-1]:
@@ -117,11 +121,12 @@ class GradientEstimator:
         self,
         coords: BehavioralCoords,
         archive_fitnesses: dict[BehavioralCoords, float],
+        bins: int = 4,
     ) -> np.ndarray:
         transitions = self._buffer.get_from(coords)
         grad_F = self._fitness_gradient(transitions)
         grad_R = self._improvement_rate_gradient(transitions)
-        grad_E = self._exploration_gradient(coords, archive_fitnesses)
+        grad_E = self._exploration_gradient(coords, archive_fitnesses, bins=bins)
         return self._w_F * grad_F + self._w_R * grad_R + self._w_E * grad_E
 
     def _fitness_gradient(self, transitions: list[TransitionRecord]) -> np.ndarray:
@@ -162,17 +167,27 @@ class GradientEstimator:
         self,
         coords: BehavioralCoords,
         archive_fitnesses: dict[BehavioralCoords, float],
+        bins: int = 4,
     ) -> np.ndarray:
         """∇E: pull toward low-fitness / empty cells, weighted by inverse Manhattan distance."""
-        if not archive_fitnesses:
+        if bins <= 0:
             return np.zeros(_DIMS)
         max_f = max(archive_fitnesses.values(), default=1.0) or 1.0
         b = np.array(coords.to_tuple(), dtype=float)
         grad = np.zeros(_DIMS)
-        for other, fitness in archive_fitnesses.items():
+        all_cells = [
+            BehavioralCoords(d_mem, d_algo, d_sync)
+            for d_mem in range(bins)
+            for d_algo in range(bins)
+            for d_sync in range(bins)
+        ]
+        for other in all_cells:
+            fitness = archive_fitnesses.get(other, 0.0)
+            if other == coords and fitness >= max_f:
+                continue
             other_b = np.array(other.to_tuple(), dtype=float)
             diff = other_b - b
             dist = np.sum(np.abs(diff)) + 1e-8
             improvement_potential = max_f - fitness
             grad += (improvement_potential / dist) * (diff / dist)
-        return grad / (len(archive_fitnesses) + 1e-8)
+        return grad / (len(all_cells) + 1e-8)
