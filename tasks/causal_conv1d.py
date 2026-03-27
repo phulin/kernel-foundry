@@ -34,14 +34,13 @@ def reference_fn(
     # x: (batch, dim, seqlen)
     # weight: (dim, width) — depthwise filter per channel
     # Causal padding: pad (width-1) on the left, 0 on the right
-    out = F.conv1d(
-        x,
+    x_padded = F.pad(x, (WIDTH - 1, 0))
+    return F.conv1d(
+        x_padded,
         weight.unsqueeze(1),  # (dim, 1, width)
         bias=bias,
         groups=DIM,
-        padding=(WIDTH - 1, 0),
     )
-    return out[..., :SEQLEN]
 
 
 def input_generator() -> tuple:
@@ -88,12 +87,11 @@ def _measure_baseline() -> float:
     bias = torch.randn(DIM, device="cuda", dtype=torch.float32)
     result = benchmarker.measure(
         lambda x, w, b: F.conv1d(
-            x,
+            F.pad(x, (WIDTH - 1, 0)),
             w.unsqueeze(1),
             bias=b,
             groups=DIM,
-            padding=(WIDTH - 1, 0),
-        )[..., :SEQLEN],
+        ),
         (x, weight, bias),
     )
     return result.mean_ms
