@@ -23,6 +23,7 @@ from kernel_foundry.evolution.loop import EvolutionLoop
 BUILTIN_TASKS = {
     "softmax": "tasks.softmax",
     "matmul": "tasks.matmul",
+    "causal_conv1d": "tasks.causal_conv1d",
 }
 
 
