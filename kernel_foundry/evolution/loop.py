@@ -125,7 +125,8 @@ class EvolutionLoop:
         best = self.archive.get_best_overall()
         if best:
             print(f"\n{'='*60}")
-            print(f"Best kernel: speedup={best.eval_result.speedup:.2f}x | coords={best.coords}")
+            speedup_str = f"{best.eval_result.speedup:.2f}x" if best.eval_result.speedup is not None else "N/A"
+            print(f"Best kernel: speedup={speedup_str} | coords={best.coords}")
             print(f"{'='*60}")
         return best
 
@@ -344,7 +345,8 @@ class EvolutionLoop:
         elif not r.correct:
             status = f"INCORRECT"
         else:
-            status = f"✓ speedup={r.speedup:.2f}x fitness={r.fitness:.3f}"
+            speedup_str = f"{r.speedup:.2f}x" if r.speedup is not None else "N/A"
+            status = f"✓ speedup={speedup_str} fitness={r.fitness:.3f}"
         print(f"  [{idx}] {record.coords} → {status}")
 
     def _print_progress(self, gen: int) -> None:

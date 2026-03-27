@@ -69,7 +69,7 @@ def my_kernel(..., BLOCK_SIZE: tl.constexpr):
 ## Task
 {self._task.description}
 
-## Current Best Kernel (speedup: {best_kernel.eval_result.speedup:.2f}x)
+## Current Best Kernel (speedup: {f"{best_kernel.eval_result.speedup:.2f}x" if best_kernel.eval_result.speedup is not None else "N/A"})
 ```python
 {best_kernel.source_code}
 ```
