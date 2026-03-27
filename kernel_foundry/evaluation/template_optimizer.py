@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import ast
+import math
 import re
 from dataclasses import dataclass
+
+import torch
 
 from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.evaluation.compiler import TritonCompiler
 from kernel_foundry.evaluation.correctness import CorrectnessChecker
 from kernel_foundry.evaluation.fitness import compute_fitness
+from kernel_foundry.task.spec import BenchmarkCase
 from kernel_foundry.types import EvalResult
 
 
@@ -30,12 +34,16 @@ class TemplateOptimizer:
         benchmarker: Benchmarker,
         baseline_time_ms: float,
         target_speedup: float = 2.0,
+        input_generator=None,
+        benchmark_cases: list[BenchmarkCase] | None = None,
     ) -> None:
         self._compiler = compiler
         self._checker = checker
         self._benchmarker = benchmarker
         self._baseline_time_ms = baseline_time_ms
         self._target_speedup = target_speedup
+        self._input_generator = input_generator
+        self._benchmark_cases = benchmark_cases
 
     def is_templated(self, source_code: str) -> bool:
         """True if the code has a @triton.autotune decorator with ≥2 Config entries."""
@@ -98,20 +106,80 @@ class TemplateOptimizer:
             return None
 
         kernel_fn = getattr(compile_result.module, "kernel_fn")
-        inputs = self._checker._input_generator()
-        bench = self._benchmarker.measure(kernel_fn, inputs)
-        speedup = self._baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0
+        benchmark = self._benchmark_kernel(kernel_fn)
 
         result = EvalResult(
             kernel_id=kernel_id,
             compiled=True,
             correct=True,
-            kernel_time_ms=bench.mean_ms,
-            baseline_time_ms=self._baseline_time_ms,
-            speedup=speedup,
+            kernel_time_ms=benchmark["kernel_time_ms"],
+            baseline_time_ms=benchmark["baseline_time_ms"],
+            speedup=benchmark["speedup"],
+            profiling_summary=benchmark["profiling_summary"],
         )
         result.fitness = compute_fitness(result, self._target_speedup)
         return result
+
+    def _benchmark_kernel(self, kernel_fn) -> dict[str, float | str]:
+        cases = self._benchmark_cases
+        if not cases:
+            input_generator = self._input_generator
+            if input_generator is None and self._checker is not None:
+                input_generator = self._checker._input_generator
+            if input_generator is None:
+                msg = "TemplateOptimizer requires an input generator when benchmark_cases are absent"
+                raise ValueError(msg)
+
+            inputs = input_generator()
+            bench = self._benchmarker.measure(kernel_fn, inputs)
+            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
+            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
+            return {
+                "kernel_time_ms": bench.mean_ms,
+                "baseline_time_ms": self._baseline_time_ms,
+                "speedup": self._baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0,
+                "profiling_summary": (
+                    f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
+                    f"(n={bench.num_iters}) | "
+                    f"input={input_bytes/1e6:.2f}MB | "
+                    f"eff_bw={eff_bw_gbs:.1f}GB/s"
+                ),
+            }
+
+        case_times: list[float] = []
+        case_baselines: list[float] = []
+        summary_parts: list[str] = []
+        for case in cases:
+            inputs = case.input_generator()
+            bench = self._benchmarker.measure(kernel_fn, inputs)
+            case_times.append(bench.mean_ms)
+            case_baselines.append(case.baseline_time_ms)
+            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
+            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
+            speedup = case.baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0
+            summary_parts.append(
+                f"{case.name}: mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
+                f"(n={bench.num_iters}, speedup={speedup:.2f}x, input={input_bytes/1e6:.2f}MB, "
+                f"eff_bw={eff_bw_gbs:.1f}GB/s)"
+            )
+
+        kernel_time_ms = self._geometric_mean(case_times)
+        baseline_time_ms = self._geometric_mean(case_baselines)
+        speedup = baseline_time_ms / kernel_time_ms if kernel_time_ms > 0 else 0.0
+        return {
+            "kernel_time_ms": kernel_time_ms,
+            "baseline_time_ms": baseline_time_ms,
+            "speedup": speedup,
+            "profiling_summary": (
+                f"agg: mean={kernel_time_ms:.3f}ms speedup={speedup:.2f}x | "
+                + " ; ".join(summary_parts)
+            ),
+        }
+
+    @staticmethod
+    def _geometric_mean(values: list[float]) -> float:
+        safe_values = [max(float(v), 1e-12) for v in values]
+        return math.exp(sum(math.log(v) for v in safe_values) / len(safe_values))
 
     @dataclass
     class ParsedConfig:

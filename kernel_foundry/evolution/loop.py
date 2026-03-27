@@ -97,6 +97,8 @@ class EvolutionLoop:
             self.benchmarker,
             baseline_time_ms=task.baseline_time_ms,
             target_speedup=config.target_speedup,
+            input_generator=task.input_generator,
+            benchmark_cases=task.benchmark_cases,
         )
 
         # State
