@@ -22,7 +22,7 @@ class EvolutionConfig:
     selection_strategy: Literal["uniform", "fitness", "curiosity", "island"] = (
         "curiosity"
     )
-    target_speedup: float = 2.0
+    target_speedup: float = 10.0
 
     # Archive (bins per dimension → bins^3 cells total)
     archive_bins: int = 4
