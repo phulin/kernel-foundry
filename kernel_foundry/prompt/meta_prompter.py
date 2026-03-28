@@ -32,7 +32,7 @@ class MetaPrompter:
         response = self._llm.generate_single(
             prompt,
             model=self._llm._config.meta_prompter_model,
-            temperature=0.5,  # slightly more creative for diagnosis
+            temperature=1.0,  # slightly more creative for diagnosis
         )
         diffs = extract_search_replace_diffs(response)[:max_mutations]
         if not diffs:

@@ -23,6 +23,8 @@ BUILTIN_TASKS = {
     "softmax": "tasks.softmax",
     "matmul": "tasks.matmul",
     "causal_conv1d": "tasks.causal_conv1d",
+    "solve_tril": "tasks.solve_tril",
+    "fused_recurrent_gated_delta_rule": "tasks.fused_recurrent_gated_delta_rule",
 }
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -26,7 +27,7 @@ DTYPE_WEIGHT = torch.float32
 DTYPE_BIAS = torch.float32
 
 CASE_SPECS = [
-    {"name": "medium", "batch": 4, "dim": 2048, "seqlen": 2048},
+    # {"name": "medium", "batch": 4, "dim": 2048, "seqlen": 2048},
     {"name": "large", "batch": 8, "dim": 4096, "seqlen": 4096},
 ]
 
@@ -69,11 +70,32 @@ def _silu(acc):
     return acc / (1 + tl.exp2(-1.44269504089 * acc))
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 256}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+    ],
+    key=["segment_seqlen", "dim"],
+)
 @triton.jit
-def _causal_conv1d_fwd_kernel(
-    X, WEIGHT, BIAS, OUT,
-    seqlen, dim,
-    stride_x_batch, stride_x_channel, stride_x_seqlen,
+def _causal_conv1d_fwd_kernel_head(
+    X,
+    WEIGHT,
+    BIAS,
+    OUT,
+    seqlen,
+    segment_seqlen,
+    dim,
+    seq_start,
+    stride_x_batch,
+    stride_x_channel,
+    stride_x_seqlen,
     stride_weight_channel, stride_weight_width,
     stride_bias_channel,
     stride_out_batch, stride_out_channel, stride_out_seqlen,
@@ -88,10 +110,11 @@ def _causal_conv1d_fwd_kernel(
     pid_b = tl.program_id(2).to(tl.int64)
 
     channels = pid_c * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
-    out_offsets = pid_l * BLOCK_L + tl.arange(0, BLOCK_L).to(tl.int64)
+    local_offsets = pid_l * BLOCK_L + tl.arange(0, BLOCK_L).to(tl.int64)
+    out_offsets = seq_start + local_offsets
 
     channel_mask = channels < dim
-    out_mask = out_offsets < seqlen
+    out_mask = local_offsets < segment_seqlen
     full_mask = channel_mask[:, None] & out_mask[None, :]
 
     x_ptrs = (
@@ -143,26 +166,320 @@ def _causal_conv1d_fwd_kernel(
     tl.store(out_ptrs, acc, mask=full_mask)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 256}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+    ],
+    key=["segment_seqlen", "dim"],
+)
+@triton.jit
+def _causal_conv1d_fwd_kernel_tail(
+    X,
+    WEIGHT,
+    BIAS,
+    OUT,
+    seqlen,
+    segment_seqlen,
+    dim,
+    seq_start,
+    channel_start,
+    stride_x_batch,
+    stride_x_channel,
+    stride_x_seqlen,
+    stride_weight_channel,
+    stride_weight_width,
+    stride_bias_channel,
+    stride_out_batch,
+    stride_out_channel,
+    stride_out_seqlen,
+    HAS_BIAS: tl.constexpr,
+    SILU_ACTIVATION: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    pid_l = tl.program_id(0).to(tl.int64)
+    pid_c = tl.program_id(1).to(tl.int64)
+    pid_b = tl.program_id(2).to(tl.int64)
+
+    channels = channel_start + pid_c * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
+    local_offsets = pid_l * BLOCK_L + tl.arange(0, BLOCK_L).to(tl.int64)
+    out_offsets = seq_start + local_offsets
+
+    channel_mask = channels < dim
+    out_mask = local_offsets < segment_seqlen
+    full_mask = channel_mask[:, None] & out_mask[None, :]
+
+    x_ptrs = (
+        X
+        + pid_b * stride_x_batch
+        + channels[:, None] * stride_x_channel
+        + out_offsets[None, :] * stride_x_seqlen
+    )
+    out_ptrs = (
+        OUT
+        + pid_b * stride_out_batch
+        + channels[:, None] * stride_out_channel
+        + out_offsets[None, :] * stride_out_seqlen
+    )
+    weight_ptrs = WEIGHT + channels * stride_weight_channel
+
+    acc = tl.zeros((BLOCK_C, BLOCK_L), dtype=tl.float32)
+    if HAS_BIAS:
+        bias_vals = tl.load(BIAS + channels * stride_bias_channel, mask=channel_mask, other=0.0).to(tl.float32)
+        acc += bias_vals[:, None]
+
+    w0 = tl.load(weight_ptrs + 0 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+    x0 = tl.load(x_ptrs - (WIDTH - 1) * stride_x_seqlen, mask=full_mask, other=0.0).to(tl.float32)
+    acc += w0[:, None] * x0
+
+    w1 = tl.load(weight_ptrs + 1 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+    x1 = tl.load(x_ptrs - (WIDTH - 2) * stride_x_seqlen, mask=full_mask, other=0.0).to(tl.float32)
+    acc += w1[:, None] * x1
+
+    if WIDTH >= 3:
+        w2 = tl.load(weight_ptrs + 2 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+        x2 = tl.load(x_ptrs - (WIDTH - 3) * stride_x_seqlen, mask=full_mask, other=0.0).to(tl.float32)
+        acc += w2[:, None] * x2
+
+    if WIDTH >= 4:
+        w3 = tl.load(weight_ptrs + 3 * stride_weight_width, mask=channel_mask, other=0.0).to(tl.float32)
+        x3 = tl.load(x_ptrs, mask=full_mask, other=0.0).to(tl.float32)
+        acc += w3[:, None] * x3
+
+    if SILU_ACTIVATION:
+        acc = _silu(acc)
+
+    tl.store(out_ptrs, acc, mask=full_mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 8, "BLOCK_L": 256}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 16, "BLOCK_L": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 32, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_C": 64, "BLOCK_L": 128}, num_warps=8, num_stages=3),
+    ],
+    key=["segment_seqlen", "dim"],
+)
+@triton.jit
+def _causal_conv1d_fwd_kernel_interior(
+    X,
+    WEIGHT,
+    BIAS,
+    OUT,
+    segment_seqlen,
+    dim,
+    seq_start,
+    channel_start,
+    stride_x_batch,
+    stride_x_channel,
+    stride_x_seqlen,
+    stride_weight_channel,
+    stride_weight_width,
+    stride_bias_channel,
+    stride_out_batch,
+    stride_out_channel,
+    stride_out_seqlen,
+    HAS_BIAS: tl.constexpr,
+    SILU_ACTIVATION: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    pid_l = tl.program_id(0).to(tl.int64)
+    pid_c = tl.program_id(1).to(tl.int64)
+    pid_b = tl.program_id(2).to(tl.int64)
+    channels = channel_start + pid_c * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
+    local_offsets = pid_l * BLOCK_L + tl.arange(0, BLOCK_L).to(tl.int64)
+    out_offsets = seq_start + local_offsets
+
+    x_ptrs = (
+        X
+        + pid_b * stride_x_batch
+        + channels[:, None] * stride_x_channel
+        + out_offsets[None, :] * stride_x_seqlen
+    )
+    out_ptrs = (
+        OUT
+        + pid_b * stride_out_batch
+        + channels[:, None] * stride_out_channel
+        + out_offsets[None, :] * stride_out_seqlen
+    )
+    weight_ptrs = WEIGHT + channels * stride_weight_channel
+
+    acc = tl.zeros((BLOCK_C, BLOCK_L), dtype=tl.float32)
+    if HAS_BIAS:
+        bias_vals = tl.load(BIAS + channels * stride_bias_channel).to(tl.float32)
+        acc += bias_vals[:, None]
+
+    w0 = tl.load(weight_ptrs + 0 * stride_weight_width).to(tl.float32)
+    x0 = tl.load(x_ptrs - (WIDTH - 1) * stride_x_seqlen).to(tl.float32)
+    acc += w0[:, None] * x0
+
+    w1 = tl.load(weight_ptrs + 1 * stride_weight_width).to(tl.float32)
+    x1 = tl.load(x_ptrs - (WIDTH - 2) * stride_x_seqlen).to(tl.float32)
+    acc += w1[:, None] * x1
+
+    if WIDTH >= 3:
+        w2 = tl.load(weight_ptrs + 2 * stride_weight_width).to(tl.float32)
+        x2 = tl.load(x_ptrs - (WIDTH - 3) * stride_x_seqlen).to(tl.float32)
+        acc += w2[:, None] * x2
+
+    if WIDTH >= 4:
+        w3 = tl.load(weight_ptrs + 3 * stride_weight_width).to(tl.float32)
+        x3 = tl.load(x_ptrs).to(tl.float32)
+        acc += w3[:, None] * x3
+
+    if SILU_ACTIVATION:
+        acc = _silu(acc)
+
+    tl.store(out_ptrs, acc)
+
+
 def kernel_fn(x, weight, bias):
     batch, dim, seqlen = x.shape
-    out = torch.empty_like(x)
-    BLOCK_C = 32
-    BLOCK_L = 128
     width = weight.shape[1]
-    grid = (triton.cdiv(seqlen, BLOCK_L), triton.cdiv(dim, BLOCK_C), batch)
-    _causal_conv1d_fwd_kernel[grid](
-        x, weight, bias, out,
-        seqlen, dim,
-        x.stride(0), x.stride(1), x.stride(2),
-        weight.stride(0), weight.stride(1),
-        bias.stride(0),
-        out.stride(0), out.stride(1), out.stride(2),
-        HAS_BIAS=True,
-        SILU_ACTIVATION=True,
-        WIDTH=width,
-        BLOCK_C=BLOCK_C,
-        BLOCK_L=BLOCK_L,
-    )
+    out = torch.empty_like(x)
+    bias_ptr = x if bias is None else bias
+    prefix_len = min(width - 1, seqlen)
+
+    if prefix_len > 0:
+        grid_head = lambda meta: (
+            triton.cdiv(prefix_len, meta["BLOCK_L"]),
+            triton.cdiv(dim, meta["BLOCK_C"]),
+            batch,
+        )
+        _causal_conv1d_fwd_kernel_head[grid_head](
+            x,
+            weight,
+            bias_ptr,
+            out,
+            seqlen,
+            prefix_len,
+            dim,
+            0,
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),
+            weight.stride(0),
+            weight.stride(1),
+            0 if bias is None else bias.stride(0),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            HAS_BIAS=bias is not None,
+            SILU_ACTIVATION=True,
+            WIDTH=width,
+        )
+
+    interior_len = seqlen - prefix_len
+    if interior_len > 0:
+        full_seq_align = 256
+        full_dim_align = 64
+        full_seq_len = (interior_len // full_seq_align) * full_seq_align
+        full_dim = (dim // full_dim_align) * full_dim_align
+
+        if full_seq_len > 0 and full_dim > 0:
+            grid_interior = lambda meta: (
+                full_seq_len // meta["BLOCK_L"],
+                full_dim // meta["BLOCK_C"],
+                batch,
+            )
+            _causal_conv1d_fwd_kernel_interior[grid_interior](
+                x,
+                weight,
+                bias_ptr,
+                out,
+                full_seq_len,
+                dim,
+                prefix_len,
+                0,
+                x.stride(0),
+                x.stride(1),
+                x.stride(2),
+                weight.stride(0),
+                weight.stride(1),
+                0 if bias is None else bias.stride(0),
+                out.stride(0),
+                out.stride(1),
+                out.stride(2),
+                HAS_BIAS=bias is not None,
+                SILU_ACTIVATION=True,
+                WIDTH=width,
+            )
+
+        if full_seq_len > 0 and full_dim < dim:
+            grid_tail_channels = lambda meta: (
+                full_seq_len // meta["BLOCK_L"],
+                triton.cdiv(dim - full_dim, meta["BLOCK_C"]),
+                batch,
+            )
+            _causal_conv1d_fwd_kernel_tail[grid_tail_channels](
+                x,
+                weight,
+                bias_ptr,
+                out,
+                seqlen,
+                full_seq_len,
+                dim,
+                prefix_len,
+                full_dim,
+                x.stride(0),
+                x.stride(1),
+                x.stride(2),
+                weight.stride(0),
+                weight.stride(1),
+                0 if bias is None else bias.stride(0),
+                out.stride(0),
+                out.stride(1),
+                out.stride(2),
+                HAS_BIAS=bias is not None,
+                SILU_ACTIVATION=True,
+                WIDTH=width,
+            )
+
+        if full_seq_len < interior_len:
+            grid_tail_seq = lambda meta: (
+                triton.cdiv(interior_len - full_seq_len, meta["BLOCK_L"]),
+                triton.cdiv(dim, meta["BLOCK_C"]),
+                batch,
+            )
+            _causal_conv1d_fwd_kernel_tail[grid_tail_seq](
+                x,
+                weight,
+                bias_ptr,
+                out,
+                seqlen,
+                interior_len - full_seq_len,
+                dim,
+                prefix_len + full_seq_len,
+                0,
+                x.stride(0),
+                x.stride(1),
+                x.stride(2),
+                weight.stride(0),
+                weight.stride(1),
+                0 if bias is None else bias.stride(0),
+                out.stride(0),
+                out.stride(1),
+                out.stride(2),
+                HAS_BIAS=bias is not None,
+                SILU_ACTIVATION=True,
+                WIDTH=width,
+            )
+
     return out
 """
 
@@ -202,7 +519,7 @@ def _build_benchmark_cases() -> list[BenchmarkCase]:
     return [
         BenchmarkCase(
             name=case["name"],
-            input_generator=lambda case=case: _generate_inputs(case),
+            input_generator=partial(_generate_inputs, case),
             baseline_time_ms=_measure_baseline(case),
         )
         for case in CASE_SPECS

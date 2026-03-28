@@ -18,6 +18,15 @@ REQUIREMENTS:
 4. Use `@triton.jit` for GPU kernels
 5. The code must be self-contained: include all necessary imports
 6. The code must be correct before being fast
+7. You may implement the solution as one kernel or as multiple Triton kernels launched sequentially inside `kernel_fn` if decomposition improves correctness, simplicity, or performance
+
+BASIC TRITON RULES:
+- Every Triton device kernel must be decorated with `@triton.jit`
+- Do not index Triton tensors/register blocks with dynamic Python-style expressions like `x[i]`, `x[i, j]`, `x[:, idx]`, or `x[idx, :]`
+- Access memory through pointer arithmetic plus `tl.load`/`tl.store`, or through `tl.make_block_ptr` plus block loads/stores
+- If you need sub-blocks or rows/cols, form pointer arrays or block pointers explicitly; do not treat Triton values like PyTorch/NumPy tensors
+- Only call `tl.load` on pointers or block pointers, never on values already loaded into registers
+- Prefer masked pointer loads/stores or block-pointer boundary checks for tail handling
 
 TEMPLATE FORMAT (for parameter sweeping):
 If you want to tune hardware parameters, use @triton.autotune:
@@ -193,6 +202,7 @@ Respond with a single Python code block containing the autotuned version."""
                 "- Mutate the parent kernel using the suggested directions\n"
                 "- Explore a completely different optimization strategy\n"
                 "- Combine ideas from the parent and best kernels\n"
+                "- Split the work across multiple Triton kernels and launch them sequentially from `kernel_fn` if that is advantageous\n"
                 "Correctness is required. Respond with a single Python code block."
             )
 

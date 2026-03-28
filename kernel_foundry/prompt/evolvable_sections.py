@@ -18,6 +18,7 @@ Memory:
 
 Compute:
 - Fuse elementwise operations (e.g., bias add + activation) into the same kernel pass.
+- If full fusion becomes awkward, register-heavy, or harms occupancy, consider splitting the computation into multiple kernels launched sequentially from kernel_fn.
 - Use tl.math.exp, tl.math.log, etc. for hardware-accelerated transcendentals.
 - Accumulate in fp32 even when inputs are fp16 to avoid numerical issues.
 
@@ -31,6 +32,9 @@ Parallelism:
 - Always apply a mask when the tensor size is not a multiple of BLOCK_SIZE:
     mask = offsets < n; tl.load(ptr + offsets, mask=mask, other=0.0)
 - Do not mix tl.constexpr and runtime values inappropriately.
+- Any compile-time parameter referenced inside @triton.jit must be passed into the kernel as a tl.constexpr argument; do not read Python globals like WIDTH directly from JIT code.
+- tl.arange ranges must obey Triton's constraints; avoid constructs like tl.arange(0, BLOCK_T + 3) unless the extent is guaranteed valid for Triton.
+- Be meticulous about kernel launch signatures and stride ordering: do not pass the same argument both positionally and by keyword, and double-check store strides and output pointer math.
 - Avoid reading the same global memory location multiple times; load once, reuse.
 - Numerical overflow: when computing softmax, subtract the running max before tl.exp.
 - Incorrect output shape: ensure the output tensor is allocated before calling the kernel.""",
@@ -42,8 +46,9 @@ Before writing code:
 2. Estimate arithmetic intensity = FLOPs / bytes_loaded. If < ~10, it is memory-bound.
 3. For reductions (softmax, layer norm, sum): decide between single-pass (online) or
    two-pass algorithms based on whether intermediate state fits in registers.
-4. Choose BLOCK_SIZE to be a power of 2; start with 128 and tune from there.
-5. Only add tl.dot if the operation has a natural matrix-multiplication structure.""",
+4. Decide whether the best implementation is one fused kernel or a short sequence of kernels; use multiple launches when it reduces complexity, avoids synchronization hazards, or improves locality.
+5. Choose BLOCK_SIZE to be a power of 2; start with 128 and tune from there.
+6. Only add tl.dot if the operation has a natural matrix-multiplication structure.""",
 )
 
 

@@ -50,9 +50,12 @@ class CorrectnessChecker:
         for trial in range(self._num_trials):
             try:
                 inputs = self._input_generator()
+                device = self._find_cuda_device(inputs)
                 with torch.no_grad():
                     y_ref = self._reference_fn(*inputs)
+                    self._synchronize_cuda(device)
                     y_kernel = kernel_fn(*inputs)
+                    self._synchronize_cuda(device)
 
                 if not isinstance(y_ref, torch.Tensor):
                     y_ref = y_ref[0] if isinstance(y_ref, (tuple, list)) else torch.tensor(y_ref)
@@ -82,8 +85,9 @@ class CorrectnessChecker:
                 worst_rel_error = max(worst_rel_error, max_rel_err)
 
             except Exception:
+                hint = self._cuda_failure_hint()
                 return CorrectnessResult(
-                    False, float("inf"), 0.0, traceback.format_exc(limit=8)
+                    False, float("inf"), 0.0, traceback.format_exc(limit=8) + hint
                 )
 
         correct = worst_pass_rate >= self._pass_fraction
@@ -91,4 +95,25 @@ class CorrectnessChecker:
             correct=correct,
             max_relative_error=worst_rel_error,
             element_pass_rate=worst_pass_rate,
+        )
+
+    @staticmethod
+    def _find_cuda_device(inputs: tuple):
+        for x in inputs:
+            if isinstance(x, torch.Tensor) and x.is_cuda:
+                return x.device
+        return None
+
+    @staticmethod
+    def _synchronize_cuda(device) -> None:
+        if device is not None:
+            torch.cuda.synchronize(device)
+
+    @staticmethod
+    def _cuda_failure_hint() -> str:
+        return (
+            "\n\n[KernelFoundry note] CUDA work is synchronized immediately after the "
+            "reference and candidate kernel calls. If this error mentions illegal memory "
+            "access, it likely came from the candidate kernel that just ran rather than "
+            "from the subsequent input generation step."
         )

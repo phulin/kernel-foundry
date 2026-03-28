@@ -18,6 +18,10 @@ from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.evaluation.compiler import TritonCompiler
 from kernel_foundry.evaluation.correctness import CorrectnessChecker
 from kernel_foundry.evaluation.fitness import compute_fitness
+from kernel_foundry.evaluation.isolation import (
+    run_benchmark_in_subprocess,
+    run_correctness_in_subprocess,
+)
 from kernel_foundry.evaluation.template_optimizer import TemplateOptimizer
 from kernel_foundry.evolution.selector import make_selector
 from kernel_foundry.gradient.estimator import GradientEstimator, TransitionBuffer
@@ -44,7 +48,8 @@ class EvolutionLoop:
     Phases:
       1. Seed: generate `population_size` kernels from scratch to bootstrap the archive.
       2. Main: iterative MAP-Elites selection → generation → evaluation → archive update.
-      3. Template: post-main autotune sweep for kernels with @triton.autotune decorators.
+      3. Template generation: ask the LLM to convert strong kernels into templated/autotuned variants.
+      4. Template sweep: benchmark explicit config variants for templated kernels in the archive.
     """
 
     def __init__(self, task: TaskSpec, config: EvolutionConfig, records_path: str | None = None) -> None:
@@ -138,7 +143,8 @@ class EvolutionLoop:
 
             self._print_progress(gen)
 
-        # Phase 3: Template optimization
+        # Phase 3: Template generation + optimization
+        self._run_template_generation_phase()
         self._run_template_phase()
 
         best = self.archive.get_best_overall()
@@ -165,7 +171,7 @@ class EvolutionLoop:
         if self.task.seed_kernel:
             print("  Injecting seed kernel...")
             record = self._evaluate_candidate(self.task.seed_kernel, generation=0, parent_id=None)
-            inserted = self.archive.insert(record)
+            inserted = self._insert_if_correct(record)
             self._record_transition(_SENTINEL_COORDS, record, inserted, generation=0)
             self.all_records.append(record)
             self._print_candidate_result("seed", record)
@@ -181,7 +187,7 @@ class EvolutionLoop:
             if isinstance(self.archive, IslandArchive):
                 self.archive.set_current_island(i)
             record = self._evaluate_candidate(code, generation=0, parent_id=None)
-            inserted = self.archive.insert(record)
+            inserted = self._insert_if_correct(record)
             self._record_transition(_SENTINEL_COORDS, record, inserted, generation=0)
             self.all_records.append(record)
             self._print_candidate_result(i, record)
@@ -233,7 +239,7 @@ class EvolutionLoop:
             if code is None:
                 continue
             record = self._evaluate_candidate(code, generation=gen, parent_id=parent_id)
-            inserted = self.archive.insert(record)
+            inserted = self._insert_if_correct(record)
             self._record_transition(parent_effective_coords, record, inserted, generation=gen)
             self.all_records.append(record)
             self._print_candidate_result(i, record)
@@ -245,6 +251,45 @@ class EvolutionLoop:
                 )
 
         self._flush_records()
+
+    def _run_template_generation_phase(self) -> None:
+        print(
+            f"\n[Template generation] Running {self.config.template_opt_iterations} iteration(s) "
+            f"with {self.config.template_opt_population} candidate(s) each..."
+        )
+        for iteration in range(self.config.template_opt_iterations):
+            best_record = self.archive.get_best_overall()
+            if best_record is None:
+                print("  No correct kernel available for templating.")
+                break
+
+            prompt = self.constructor.build_template_prompt(best_record)
+            responses = self.llm.generate(prompt, n=self.config.template_opt_population)
+
+            inserted_count = 0
+            for i, response in enumerate(responses):
+                code = extract_triton_code(response)
+                if code is None:
+                    continue
+                record = self._evaluate_candidate(
+                    code,
+                    generation=self.current_generation,
+                    parent_id=best_record.kernel_id,
+                )
+                inserted = self._insert_if_correct(record)
+                self._record_transition(
+                    best_record.coords,
+                    record,
+                    inserted,
+                    generation=self.current_generation,
+                )
+                self.all_records.append(record)
+                self._print_candidate_result(f"tpl-{iteration}.{i}", record)
+                if inserted:
+                    inserted_count += 1
+
+            print(f"  Template iteration {iteration}: inserted {inserted_count} correct templated kernel(s).")
+            self._flush_records()
 
     def _run_meta_prompt_update(self, gen: int) -> None:
         print(f"\n  [Gen {gen}] Running meta-prompt update...")
@@ -322,7 +367,16 @@ class EvolutionLoop:
             )
 
         # Correctness
-        correctness = self.checker.check(compile_result.module)
+        correctness = run_correctness_in_subprocess(
+            source_code,
+            kernel_id=kernel_id,
+            reference_fn=self.task.reference_fn,
+            input_generator=self.task.input_generator,
+            threshold=self.checker._threshold,
+            pass_fraction=self.checker._pass_fraction,
+            num_trials=self.checker._num_trials,
+            eps=self.checker._eps,
+        )
         result.correct = correctness.correct
         if not correctness.correct:
             result.error_log = correctness.error_log
@@ -338,8 +392,7 @@ class EvolutionLoop:
 
         # Benchmark
         try:
-            kernel_fn = getattr(compile_result.module, "kernel_fn")
-            benchmark = self._benchmark_candidate(kernel_fn)
+            benchmark = self._benchmark_candidate(source_code, kernel_id)
             result.kernel_time_ms = benchmark["kernel_time_ms"]
             result.baseline_time_ms = benchmark["baseline_time_ms"]
             result.speedup = benchmark["speedup"]
@@ -396,54 +449,24 @@ class EvolutionLoop:
             template_configs=template_configs,
         )
 
-    def _benchmark_candidate(self, kernel_fn) -> dict[str, float | str]:
-        cases = self.task.benchmark_cases
-        if not cases:
-            inputs = self.task.input_generator()
-            bench = self.benchmarker.measure(kernel_fn, inputs)
-            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
-            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
-            return {
-                "kernel_time_ms": bench.mean_ms,
-                "baseline_time_ms": self.task.baseline_time_ms,
-                "speedup": self.task.baseline_time_ms / bench.mean_ms,
-                "profiling_summary": (
-                    f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
-                    f"(n={bench.num_iters}) | "
-                    f"input={input_bytes/1e6:.2f}MB | "
-                    f"eff_bw={eff_bw_gbs:.1f}GB/s"
-                ),
-            }
+    def _insert_if_correct(self, record: KernelRecord) -> bool:
+        if not record.eval_result.correct:
+            return False
+        return self.archive.insert(record)
 
-        case_times: list[float] = []
-        case_baselines: list[float] = []
-        summary_parts: list[str] = []
-        for case in cases:
-            inputs = case.input_generator()
-            bench = self.benchmarker.measure(kernel_fn, inputs)
-            case_times.append(bench.mean_ms)
-            case_baselines.append(case.baseline_time_ms)
-            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
-            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
-            speedup = case.baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0
-            summary_parts.append(
-                f"{case.name}: mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
-                f"(n={bench.num_iters}, speedup={speedup:.2f}x, input={input_bytes/1e6:.2f}MB, "
-                f"eff_bw={eff_bw_gbs:.1f}GB/s)"
-            )
-
-        kernel_time_ms = self._geometric_mean(case_times)
-        baseline_time_ms = self._geometric_mean(case_baselines)
-        speedup = baseline_time_ms / kernel_time_ms if kernel_time_ms > 0 else 0.0
-        return {
-            "kernel_time_ms": kernel_time_ms,
-            "baseline_time_ms": baseline_time_ms,
-            "speedup": speedup,
-            "profiling_summary": (
-                f"agg: mean={kernel_time_ms:.3f}ms speedup={speedup:.2f}x | "
-                + " ; ".join(summary_parts)
-            ),
-        }
+    def _benchmark_candidate(self, source_code: str, kernel_id: str) -> dict[str, float | str]:
+        return run_benchmark_in_subprocess(
+            source_code,
+            kernel_id=kernel_id,
+            input_generator=self.task.input_generator,
+            benchmark_cases=self.task.benchmark_cases,
+            baseline_time_ms=self.task.baseline_time_ms,
+            warmup_min_time=self.config.warmup_min_time,
+            warmup_min_iters=self.config.warmup_min_iters,
+            benchmark_min_time=self.config.benchmark_min_time,
+            benchmark_min_iters=self.config.benchmark_min_iters,
+            inner_loop_min_time=self.config.inner_loop_min_time,
+        )
 
     @staticmethod
     def _geometric_mean(values: list[float]) -> float:
@@ -478,7 +501,7 @@ class EvolutionLoop:
 
     # ------------------------------------------------------------------ logging
 
-    def _print_candidate_result(self, idx: int, record: KernelRecord) -> None:
+    def _print_candidate_result(self, idx: int | str, record: KernelRecord) -> None:
         r = record.eval_result
         if not r.compiled:
             status = f"COMPILE ERROR"

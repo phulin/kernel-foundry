@@ -10,9 +10,11 @@ from dotenv import load_dotenv
 @dataclass
 class EvolutionConfig:
     # LLM
-    llm_model: str = "gpt-5.4"
-    meta_prompter_model: str = "gpt-5.4"
-    llm_temperature: float = 0.3
+    # Azure OpenAI expects deployment names here. If your deployment is named
+    # "gpt-5.4", the defaults can stay as-is.
+    llm_model: str = "gpt-5.3-chat"
+    meta_prompter_model: str = "gpt-5.3-chat"
+    llm_temperature: float = 1.0
     llm_max_tokens: int = 8000
     llm_top_p: float = 1.0
 
@@ -26,7 +28,7 @@ class EvolutionConfig:
     selection_weight_fitness: float = 0.25
     selection_weight_curiosity: float = 0.25
     selection_weight_island: float = 0.25
-    target_speedup: float = 18.0
+    target_speedup: float = 1000.0
 
     # Archive (bins per dimension → bins^3 cells total)
     archive_bins: int = 4
@@ -59,9 +61,25 @@ class EvolutionConfig:
     island_migration_freq: int = 10
 
     @property
-    def openai_api_key(self) -> str:
+    def azure_openai_api_key(self) -> str:
         load_dotenv()
-        key = os.environ.get("OPENAI_API_KEY", "")
+        key = os.environ.get("AZURE_OPENAI_API_KEY", "")
         if not key:
-            raise ValueError("OPENAI_API_KEY not set in environment or .env file")
+            raise ValueError("AZURE_OPENAI_API_KEY not set in environment or .env file")
         return key
+
+    @property
+    def azure_openai_api_version(self) -> str:
+        load_dotenv()
+        version = os.environ.get("AZURE_OPENAI_API_VERSION", "").strip()
+        if not version:
+            raise ValueError("AZURE_OPENAI_API_VERSION not set in environment or .env file")
+        return version
+
+    @property
+    def azure_openai_endpoint(self) -> str:
+        load_dotenv()
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+        if not endpoint:
+            raise ValueError("AZURE_OPENAI_ENDPOINT not set in environment or .env file")
+        return f"{endpoint}/"

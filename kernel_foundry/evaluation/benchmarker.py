@@ -53,8 +53,7 @@ class Benchmarker:
         warmup_iters = max(self._warmup_min_iters, int(self._warmup_min_time / (rough_ms / 1000) + 1))
         for _ in range(warmup_iters):
             fn(*inputs)
-        if device is not None:
-            torch.cuda.synchronize(device)
+            self._synchronize_cuda(device)
 
         # Determine inner loop count (amortize synchronize overhead)
         inner_iters = max(1, int(self._inner_loop_min_time / (rough_ms / 1000) + 1))
@@ -67,8 +66,7 @@ class Benchmarker:
             t0 = time.perf_counter()
             for _ in range(inner_iters):
                 fn(*inputs)
-            if device is not None:
-                torch.cuda.synchronize(device)
+                self._synchronize_cuda(device)
             t1 = time.perf_counter()
             per_iter_ms = (t1 - t0) * 1000 / inner_iters
             timings.append(per_iter_ms)
@@ -87,13 +85,11 @@ class Benchmarker:
 
     def _probe(self, fn: Callable, inputs: tuple, device) -> float:
         """Run 3 iterations and return mean time in ms."""
-        if device is not None:
-            torch.cuda.synchronize(device)
+        self._synchronize_cuda(device)
         t0 = time.perf_counter()
         for _ in range(3):
             fn(*inputs)
-        if device is not None:
-            torch.cuda.synchronize(device)
+            self._synchronize_cuda(device)
         return (time.perf_counter() - t0) * 1000 / 3
 
     @staticmethod
@@ -103,3 +99,8 @@ class Benchmarker:
             if isinstance(x, torch.Tensor) and x.is_cuda:
                 return x.device
         return None
+
+    @staticmethod
+    def _synchronize_cuda(device) -> None:
+        if device is not None:
+            torch.cuda.synchronize(device)

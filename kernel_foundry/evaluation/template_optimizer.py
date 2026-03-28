@@ -11,6 +11,10 @@ from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.evaluation.compiler import TritonCompiler
 from kernel_foundry.evaluation.correctness import CorrectnessChecker
 from kernel_foundry.evaluation.fitness import compute_fitness
+from kernel_foundry.evaluation.isolation import (
+    run_benchmark_in_subprocess,
+    run_correctness_in_subprocess,
+)
 from kernel_foundry.task.spec import BenchmarkCase
 from kernel_foundry.types import EvalResult
 
@@ -101,12 +105,20 @@ class TemplateOptimizer:
         if not compile_result.success or compile_result.module is None:
             return None
 
-        correctness = self._checker.check(compile_result.module)
+        correctness = run_correctness_in_subprocess(
+            source_code,
+            kernel_id=kernel_id,
+            reference_fn=self._checker._reference_fn,
+            input_generator=self._checker._input_generator,
+            threshold=self._checker._threshold,
+            pass_fraction=self._checker._pass_fraction,
+            num_trials=self._checker._num_trials,
+            eps=self._checker._eps,
+        )
         if not correctness.correct:
             return None
 
-        kernel_fn = getattr(compile_result.module, "kernel_fn")
-        benchmark = self._benchmark_kernel(kernel_fn)
+        benchmark = self._benchmark_kernel(source_code, kernel_id)
 
         result = EvalResult(
             kernel_id=kernel_id,
@@ -120,61 +132,22 @@ class TemplateOptimizer:
         result.fitness = compute_fitness(result, self._target_speedup)
         return result
 
-    def _benchmark_kernel(self, kernel_fn) -> dict[str, float | str]:
-        cases = self._benchmark_cases
-        if not cases:
-            input_generator = self._input_generator
-            if input_generator is None and self._checker is not None:
-                input_generator = self._checker._input_generator
-            if input_generator is None:
-                msg = "TemplateOptimizer requires an input generator when benchmark_cases are absent"
-                raise ValueError(msg)
-
-            inputs = input_generator()
-            bench = self._benchmarker.measure(kernel_fn, inputs)
-            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
-            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
-            return {
-                "kernel_time_ms": bench.mean_ms,
-                "baseline_time_ms": self._baseline_time_ms,
-                "speedup": self._baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0,
-                "profiling_summary": (
-                    f"mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
-                    f"(n={bench.num_iters}) | "
-                    f"input={input_bytes/1e6:.2f}MB | "
-                    f"eff_bw={eff_bw_gbs:.1f}GB/s"
-                ),
-            }
-
-        case_times: list[float] = []
-        case_baselines: list[float] = []
-        summary_parts: list[str] = []
-        for case in cases:
-            inputs = case.input_generator()
-            bench = self._benchmarker.measure(kernel_fn, inputs)
-            case_times.append(bench.mean_ms)
-            case_baselines.append(case.baseline_time_ms)
-            input_bytes = sum(x.nbytes for x in inputs if isinstance(x, torch.Tensor))
-            eff_bw_gbs = input_bytes / (bench.mean_ms / 1000) / 1e9
-            speedup = case.baseline_time_ms / bench.mean_ms if bench.mean_ms > 0 else 0.0
-            summary_parts.append(
-                f"{case.name}: mean={bench.mean_ms:.3f}ms std={bench.std_ms:.3f}ms "
-                f"(n={bench.num_iters}, speedup={speedup:.2f}x, input={input_bytes/1e6:.2f}MB, "
-                f"eff_bw={eff_bw_gbs:.1f}GB/s)"
-            )
-
-        kernel_time_ms = self._geometric_mean(case_times)
-        baseline_time_ms = self._geometric_mean(case_baselines)
-        speedup = baseline_time_ms / kernel_time_ms if kernel_time_ms > 0 else 0.0
-        return {
-            "kernel_time_ms": kernel_time_ms,
-            "baseline_time_ms": baseline_time_ms,
-            "speedup": speedup,
-            "profiling_summary": (
-                f"agg: mean={kernel_time_ms:.3f}ms speedup={speedup:.2f}x | "
-                + " ; ".join(summary_parts)
-            ),
-        }
+    def _benchmark_kernel(self, source_code: str, kernel_id: str) -> dict[str, float | str]:
+        input_generator = self._input_generator
+        if input_generator is None and self._checker is not None:
+            input_generator = self._checker._input_generator
+        return run_benchmark_in_subprocess(
+            source_code,
+            kernel_id=kernel_id,
+            input_generator=input_generator,
+            benchmark_cases=self._benchmark_cases,
+            baseline_time_ms=self._baseline_time_ms,
+            warmup_min_time=self._benchmarker._warmup_min_time,
+            warmup_min_iters=self._benchmarker._warmup_min_iters,
+            benchmark_min_time=self._benchmarker._benchmark_min_time,
+            benchmark_min_iters=self._benchmarker._benchmark_min_iters,
+            inner_loop_min_time=self._benchmarker._inner_loop_min_time,
+        )
 
     @staticmethod
     def _geometric_mean(values: list[float]) -> float:
