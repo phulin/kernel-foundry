@@ -1,0 +1,1 @@
+- There is a virtual environment in .venv. Activate before running python code.

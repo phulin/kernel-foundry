@@ -13,3 +13,4 @@ dependencies = [
 
 [project.scripts]
 kernel-foundry = "main:cli"
+kernel-foundry-world-model = "main_world_model:cli"

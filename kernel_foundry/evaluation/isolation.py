@@ -55,6 +55,7 @@ def run_benchmark_in_subprocess(
     benchmark_min_time: float,
     benchmark_min_iters: int,
     inner_loop_min_time: float,
+    ncu_path: str | None = None,
     timeout_s: float = 300.0,
 ) -> dict[str, float | str]:
     payload = _run_in_subprocess(
@@ -70,6 +71,7 @@ def run_benchmark_in_subprocess(
             benchmark_min_time,
             benchmark_min_iters,
             inner_loop_min_time,
+            ncu_path,
         ),
         timeout_s=timeout_s,
     )
@@ -159,6 +161,7 @@ def _benchmark_worker(
     benchmark_min_time: float,
     benchmark_min_iters: int,
     inner_loop_min_time: float,
+    ncu_path: str | None = None,
 ) -> None:
     try:
         compile_result = TritonCompiler().compile(source_code, kernel_id=kernel_id)
@@ -179,6 +182,22 @@ def _benchmark_worker(
             benchmark_cases,
             baseline_time_ms,
         )
+
+        if ncu_path:
+            from kernel_foundry.evaluation.profiler import profile_kernel
+
+            if benchmark_cases:
+                ncu_inputs = benchmark_cases[0].input_generator()
+            elif input_generator is not None:
+                ncu_inputs = input_generator()
+            else:
+                ncu_inputs = None
+
+            if ncu_inputs is not None:
+                ncu_output = profile_kernel(source_code, ncu_inputs, ncu_path)
+                if ncu_output:
+                    result["ncu_output"] = ncu_output
+
         queue.put({"status": "ok", "result": result})
     except Exception:
         queue.put({"status": "error", "error_log": traceback.format_exc(limit=12)})

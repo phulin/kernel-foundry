@@ -130,9 +130,10 @@ Respond with a single Python code block containing the autotuned version."""
                 else "unknown"
             )
             parts.append(f"## Current Best Kernel (speedup: {speedup_str})")
-            parts.append(f"Behavioral coords: {best_kernel.coords}")
             if best_kernel.eval_result.profiling_summary:
                 parts.append(f"Profiling: {best_kernel.eval_result.profiling_summary}")
+            if best_kernel.eval_result.ncu_output:
+                parts.append(f"NCU Profile:\n{best_kernel.eval_result.ncu_output}")
             if best_kernel.template_configs:
                 parts.append(self._format_template_configs(best_kernel.template_configs))
             parts.append("```python")
@@ -153,9 +154,10 @@ Respond with a single Python code block containing the autotuned version."""
                 else f"INCORRECT — {parent_kernel.eval_result.error_log[:200]}"
             )
             parts.append(f"## Parent Kernel to Improve ({parent_status})")
-            parts.append(f"Behavioral coords: {parent_kernel.coords}")
             if parent_kernel.eval_result.profiling_summary:
                 parts.append(f"Profiling: {parent_kernel.eval_result.profiling_summary}")
+            if parent_kernel.eval_result.ncu_output:
+                parts.append(f"NCU Profile:\n{parent_kernel.eval_result.ncu_output}")
             if parent_kernel.template_configs:
                 parts.append(self._format_template_configs(parent_kernel.template_configs))
             parts.append("```python")

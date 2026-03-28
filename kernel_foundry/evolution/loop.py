@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import traceback
-import uuid
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +15,7 @@ from kernel_foundry.config import EvolutionConfig
 from kernel_foundry.evaluation.benchmarker import Benchmarker
 from kernel_foundry.evaluation.compiler import TritonCompiler
 from kernel_foundry.evaluation.correctness import CorrectnessChecker
-from kernel_foundry.evaluation.fitness import compute_fitness
-from kernel_foundry.evaluation.isolation import (
-    run_benchmark_in_subprocess,
-    run_correctness_in_subprocess,
-)
+from kernel_foundry.evaluation.service import CandidateEvaluator
 from kernel_foundry.evaluation.template_optimizer import TemplateOptimizer
 from kernel_foundry.evolution.selector import make_selector
 from kernel_foundry.gradient.estimator import GradientEstimator, TransitionBuffer
@@ -33,7 +27,6 @@ from kernel_foundry.prompt.meta_prompter import MetaPrompter
 from kernel_foundry.task.spec import TaskSpec
 from kernel_foundry.types import (
     BehavioralCoords,
-    EvalResult,
     KernelRecord,
     TransitionRecord,
 )
@@ -109,6 +102,15 @@ class EvolutionLoop:
             target_speedup=config.target_speedup,
             input_generator=task.input_generator,
             benchmark_cases=task.benchmark_cases,
+        )
+        self.evaluator = CandidateEvaluator(
+            task,
+            config,
+            classifier=self.classifier,
+            compiler=self.compiler,
+            benchmarker=self.benchmarker,
+            checker=self.checker,
+            template_optimizer=self.template_optimizer,
         )
 
         # State
@@ -341,112 +343,10 @@ class EvolutionLoop:
     def _evaluate_candidate(
         self, source_code: str, generation: int, parent_id: str | None
     ) -> KernelRecord:
-        kernel_id = str(uuid.uuid4())[:8]
-        coords = BehavioralCoords(0, 0, 0)
-        result = EvalResult(kernel_id=kernel_id, compiled=False, correct=False)
-
-        # Classify behavioral coordinates (static, no GPU needed)
-        try:
-            coords = self.classifier.classify(source_code)
-        except Exception:
-            pass
-
-        # Compile
-        compile_result = self.compiler.compile(source_code, kernel_id=kernel_id)
-        result.compiled = compile_result.success
-        if not compile_result.success:
-            result.error_log = compile_result.error_log
-            result.fitness = compute_fitness(result, self.config.target_speedup)
-            return KernelRecord(
-                kernel_id=kernel_id,
-                generation=generation,
-                parent_id=parent_id,
-                source_code=source_code,
-                coords=coords,
-                eval_result=result,
-            )
-
-        # Correctness
-        correctness = run_correctness_in_subprocess(
+        return self.evaluator.evaluate_candidate(
             source_code,
-            kernel_id=kernel_id,
-            reference_fn=self.task.reference_fn,
-            input_generator=self.task.input_generator,
-            threshold=self.checker._threshold,
-            pass_fraction=self.checker._pass_fraction,
-            num_trials=self.checker._num_trials,
-            eps=self.checker._eps,
-        )
-        result.correct = correctness.correct
-        if not correctness.correct:
-            result.error_log = correctness.error_log
-            result.fitness = compute_fitness(result, self.config.target_speedup)
-            return KernelRecord(
-                kernel_id=kernel_id,
-                generation=generation,
-                parent_id=parent_id,
-                source_code=source_code,
-                coords=coords,
-                eval_result=result,
-            )
-
-        # Benchmark
-        try:
-            benchmark = self._benchmark_candidate(source_code, kernel_id)
-            result.kernel_time_ms = benchmark["kernel_time_ms"]
-            result.baseline_time_ms = benchmark["baseline_time_ms"]
-            result.speedup = benchmark["speedup"]
-            result.profiling_summary = benchmark["profiling_summary"]
-        except Exception:
-            result.error_log = traceback.format_exc(limit=6)
-            result.fitness = compute_fitness(result, self.config.target_speedup)
-            return KernelRecord(
-                kernel_id=kernel_id,
-                generation=generation,
-                parent_id=parent_id,
-                source_code=source_code,
-                coords=coords,
-                eval_result=result,
-            )
-
-        result.fitness = compute_fitness(result, self.config.target_speedup)
-
-        # Template config sweep for per-config LLM feedback (fix 1).
-        # Run the explicit sweep so the LLM can learn which triton.Config entries
-        # worked and which didn't; use the best sweep result if it beats Triton's
-        # native autotuner result.
-        is_templated = False
-        template_configs: list[dict] | None = None
-        if self.template_optimizer.is_templated(source_code):
-            is_templated = True
-            sweep_results = self.template_optimizer.sweep(
-                source_code, kernel_id_prefix=kernel_id
-            )
-            if sweep_results:
-                template_configs = [
-                    {
-                        "config": r.config,
-                        "speedup": r.eval_result.speedup,
-                        "correct": r.eval_result.correct,
-                        "kernel_time_ms": r.eval_result.kernel_time_ms,
-                    }
-                    for r in sweep_results
-                ]
-                best_sweep = max(sweep_results, key=lambda r: r.eval_result.fitness)
-                if best_sweep.eval_result.fitness > result.fitness:
-                    result.kernel_time_ms = best_sweep.eval_result.kernel_time_ms
-                    result.speedup = best_sweep.eval_result.speedup
-                    result.fitness = best_sweep.eval_result.fitness
-
-        return KernelRecord(
-            kernel_id=kernel_id,
             generation=generation,
             parent_id=parent_id,
-            source_code=source_code,
-            coords=coords,
-            eval_result=result,
-            is_templated=is_templated,
-            template_configs=template_configs,
         )
 
     def _insert_if_correct(self, record: KernelRecord) -> bool:
@@ -455,18 +355,7 @@ class EvolutionLoop:
         return self.archive.insert(record)
 
     def _benchmark_candidate(self, source_code: str, kernel_id: str) -> dict[str, float | str]:
-        return run_benchmark_in_subprocess(
-            source_code,
-            kernel_id=kernel_id,
-            input_generator=self.task.input_generator,
-            benchmark_cases=self.task.benchmark_cases,
-            baseline_time_ms=self.task.baseline_time_ms,
-            warmup_min_time=self.config.warmup_min_time,
-            warmup_min_iters=self.config.warmup_min_iters,
-            benchmark_min_time=self.config.benchmark_min_time,
-            benchmark_min_iters=self.config.benchmark_min_iters,
-            inner_loop_min_time=self.config.inner_loop_min_time,
-        )
+        return self.evaluator.benchmark_candidate(source_code, kernel_id)
 
     @staticmethod
     def _geometric_mean(values: list[float]) -> float:

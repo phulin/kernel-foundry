@@ -36,6 +36,7 @@ class EvalResult:
     fitness: float = 0.0
     error_log: str = ""
     profiling_summary: str | None = None
+    ncu_output: str | None = None
 
 
 @dataclass
@@ -54,8 +55,8 @@ class KernelRecord:
     generation: int
     parent_id: str | None
     source_code: str
-    coords: BehavioralCoords
     eval_result: EvalResult
+    coords: BehavioralCoords | None = None
     is_templated: bool = False
     template_configs: list[dict] | None = None
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -48,6 +49,28 @@ def extract_search_replace_diffs(response: str) -> list[tuple[str, str]]:
     pattern = r"<<<SEARCH>>>\s*(.*?)<<<REPLACE>>>\s*(.*?)<<<END>>>"
     matches = re.findall(pattern, response, re.DOTALL)
     return [(s.strip(), r.strip()) for s, r in matches[:3]]
+
+
+def extract_json_payload(response: str) -> str:
+    """
+    Extract a JSON payload from an LLM response.
+
+    Accepts a raw JSON object/array or a fenced ```json block.
+    """
+    patterns = [
+        r"```json\s*\n(.*?)```",
+        r"```\s*\n(.*?)```",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, response, re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+            json.loads(candidate)
+            return candidate
+
+    response = response.strip()
+    json.loads(response)
+    return response
 
 
 def _looks_like_triton_kernel(code: str) -> bool:
